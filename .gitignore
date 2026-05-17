@@ -1,0 +1,27 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# Runtime data (DB, logs, learned prices)
+data/
+logs/
+*.db
+*.db-shm
+*.db-wal
+*.log
+
+# Playwright persistent browser profile
+browser_profile/
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
