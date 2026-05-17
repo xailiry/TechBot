@@ -11,30 +11,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-_LAT_TO_CYR = {
-    "a": "а", "c": "с", "e": "е", "o": "о", "p": "р", "x": "х", "y": "у",
-    "A": "А", "B": "В", "C": "С", "E": "Е", "H": "Н", "K": "К", "M": "М",
-    "O": "О", "P": "Р", "T": "Т", "X": "Х", "Y": "У",
-}
-
-
-def _is_cyr(ch: str) -> bool:
-    return bool(ch) and (0x0410 <= ord(ch) <= 0x044F or ch in ("ё", "Ё"))
-
-
-def normalize_homoglyphs(text: str) -> str:
-    if not text:
-        return text
-    out = list(text)
-    n = len(out)
-    for i, ch in enumerate(out):
-        if ch not in _LAT_TO_CYR:
-            continue
-        left = out[i - 1] if i > 0 else ""
-        right = out[i + 1] if i < n - 1 else ""
-        if _is_cyr(left) or _is_cyr(right):
-            out[i] = _LAT_TO_CYR[ch]
-    return "".join(out)
+# Re-exported for back-compat; logic lives in the shared textnorm module.
+from ..textnorm import homoglyph_ratio, normalize_homoglyphs  # noqa: F401
 
 
 _ORIG = [
@@ -210,9 +188,39 @@ def score_listing(
         score -= 22
         cons.append("текст «идеал», но на фото разбитый экран")
 
+    no_original = False
+
+    # Obfuscation: Latin lookalikes embedded in Cyrillic words. Honest
+    # private sellers don't do this; resellers/scammers do.
+    ratio = homoglyph_ratio(f"{title} {description}")
+    if ratio >= 0.04:
+        score -= 25
+        no_original = True
+        cons.append("массовая подмена букв (обфускация спама)")
+    elif ratio >= 0.015:
+        score -= 10
+        cons.append("подмена букв в тексте")
+
+    # "Выкуп вашей техники Apple/Samsung..." = reseller, not a one-off
+    # private sale, even if the badge says "Частное лицо".
+    if re.search(r"\bвыкуп\w*\s+(?:ваш|вашей|техник|устройств|айфон|"
+                 r"телефон)", full, re.I):
+        score -= 14
+        no_original = True
+        cons.append("скупка/выкуп техники — перекуп")
+
+    # Claims "оригинал/идеал" while the screen/parts are NOT original.
+    if (
+        ({"screen_replaced", "not_original_parts"} & set(defects))
+        and (_any(full, _ORIG) or _IDEAL_CLAIM.search(full))
+    ):
+        score -= 22
+        no_original = True
+        cons.append("заявлен оригинал/идеал, но экран/детали не родные")
+
     if fake:
         verdict = "fake"
-    elif score >= 68:
+    elif score >= 68 and not no_original:
         verdict = "original"
     elif score <= 32:
         verdict = "suspicious"

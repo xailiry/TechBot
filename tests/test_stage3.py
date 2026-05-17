@@ -93,6 +93,26 @@ def test_scam() -> None:
           "айфон" in normalize_homoglyphs("aйфoн".replace("o", "о")) or
           normalize_homoglyphs("Bаре") == "Варе")
 
+    # Obfuscated reseller spam must not pass as "original".
+    spam = score_listing(
+        "iPhone 15 Pro 256", "оpигинaл, идeaл. Bыкуп вашeй тexники Aррlе",
+        38000, condition="good", baseline_price=50000,
+    )
+    check("obfuscated spam not original", spam.verdict != "original")
+    check("spam flagged",
+          any(("обфускац" in c or "подмена" in c or "перекуп" in c)
+              for c in spam.cons))
+
+    # Claims original but screen was replaced -> contradiction.
+    contra = score_listing(
+        "iPhone 15 Pro", "оригинал, идеал, всё родное", 40000,
+        condition="defect", baseline_price=50000,
+        defects=["screen_replaced"],
+    )
+    check("orig-claim vs replaced screen",
+          any("не родны" in c for c in contra.cons)
+          and contra.verdict != "original")
+
 
 async def test_devices_baseline() -> None:
     tag = uuid.uuid4().hex[:8]

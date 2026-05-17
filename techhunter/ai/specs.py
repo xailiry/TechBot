@@ -18,6 +18,8 @@ Defect codes:
 import re
 from dataclasses import dataclass, field
 
+from ..textnorm import normalize_homoglyphs
+
 # ─── battery health ─────────────────────────────────────────────────────────
 _BAT_WORD = r"(?:акб|аккумулятор[а-я]*|батаре[ияй]|battery(?:\s*health)?|ё?мкост[ьи](?:\s*акб)?)"
 _BAT_AFTER = re.compile(_BAT_WORD + r"[^0-9%]{0,12}(\d{1,3})\s*%?", re.I)
@@ -37,13 +39,14 @@ _DEFECT_PATTERNS: list[tuple[str, str]] = [
     (r"на\s*зап\.?части|на\s*донор|по\s*запчаст", "no_power"),
     (r"не\s*включ|не\s*работает\s*(?:вообще|телефон|совсем)|нет\s*изображени|"
      r"не\s*запуска|dead\b|до[нр]ор", "no_power"),
-    (r"разби\w*\s*экран|разби\w*\s*дисплей|треснут\w*\s*экран|трещин\w*\s*на\s*экран|"
+    (r"разби\w*\s*экран|разби\w*\s*диспл\w*|треснут\w*\s*экран|трещин\w*\s*на\s*экран|"
      r"би[тл]\w*\s*экран|разбит\s*перед|треснут\w*\s*стекл\w*\s*спереди|broken screen|"
      r"cracked screen", "screen_cracked"),
     (r"разби\w*\s*(?:зад|крышк|корпус)|треснут\w*\s*(?:зад|крышк)|"
      r"стекл\w*\s*сзади\s*(?:разб|трес)|би[тл]\w*\s*крышк", "back_glass_cracked"),
-    (r"замен\w*\s*(?:экран|дисплей|модул)|неоригинал\w*\s*(?:экран|дисплей)|"
-     r"дисплей\s*не\s*родн|копийн\w*\s*экран", "screen_replaced"),
+    (r"замен\w*\s*(?:экран\w*|диспл\w*|модул\w*)|неоригинал\w*\s*(?:экран\w*|диспл\w*)|"
+     r"диспл\w*\s*не\s*родн|копийн\w*\s*экран|"
+     r"диспл\w*\s*(?:замен|менял|поменя|неоригинал|не\s*родн|аналог)", "screen_replaced"),
     (r"замен\w*\s*(?:акб|аккумулятор|батаре)|акб\s*(?:под\s*замен|сла[бч]|"
      r"быстро\s*сад|вздут)|батаре\w*\s*вздут|нужн\w*\s*замен\w*\s*акб", "battery_replaced"),
     (r"face\s*id\s*(?:не\s*раб|сломан|нет|отсутств)|"
@@ -160,8 +163,13 @@ def extract_specs(
     title: str, description: str = "", params: dict[str, str] | None = None
 ) -> DeviceSpecs:
     params = params or {}
-    text = " ".join(
-        [title or "", description or "", " ".join(f"{k} {v}" for k, v in params.items())]
+    # Normalize Latin-lookalike homoglyphs first: spam listings disguise
+    # "замена дисплея" as "зaмена диcплeя" to dodge defect detection.
+    text = normalize_homoglyphs(
+        " ".join(
+            [title or "", description or "",
+             " ".join(f"{k} {v}" for k, v in params.items())]
+        )
     ).lower()
 
     specs = DeviceSpecs()

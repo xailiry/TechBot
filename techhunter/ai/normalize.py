@@ -7,6 +7,8 @@ still works and Stage 3 can skip valuation gracefully.
 import re
 from dataclasses import dataclass
 
+from ..textnorm import normalize_homoglyphs
+
 _IPHONE_RE = re.compile(
     r"(?:iphone|айфон|айф)\s*"
     r"(1[0-6]|[5-9]|se|xr|xs|x)\s*"
@@ -119,9 +121,11 @@ def normalize_device(
     params: dict[str, str] | None = None,
 ) -> CanonicalDevice:
     params = params or {}
-    text = (title or "").lower()
+    text = normalize_homoglyphs(title or "").lower()
     if params:
-        text += " " + " ".join(str(v).lower() for v in params.values())
+        text += " " + normalize_homoglyphs(
+            " ".join(str(v) for v in params.values())
+        ).lower()
 
     brand = _detect_brand(text)
     model = None

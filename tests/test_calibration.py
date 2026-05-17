@@ -171,9 +171,38 @@ async def case_cosmetic_only_no_overvalue() -> None:
           "condition_discount_unknown" in val.missing)
 
 
+async def case_homoglyph_screen_replaced() -> None:
+    # Real long-test bug: spam listing hides "замена дисплея" with Latin
+    # lookalikes. Must be detected -> defect, no deal, not "original".
+    await _seed_baseline("apple", "iPhone 15 Pro", 256, 50000)
+    it = _item(
+        "iPhone 15 Pro, 256 ГБ, 2 SIM",
+        "Прoдам iPhone 15 Pro 256gb. Прoизводилаcь зaмена диcплeя нa "
+        "xopоший аналoг бeз oшибки. Cocтoяние aккумулятopa 100% оpигинaл, "
+        "334 циклa. Otвязан oт аккаунтов. Ecть выкуп вашeй тexники "
+        "Aррlе Sаmsung Gооglе.",
+        38990, seller_name="Пользователь",
+    )
+    rep = await evaluate_listing(it, run_clip=False, do_dedup=False)
+    val = await value_listing(it, rep, log_obs=False)
+    check("HG model", rep.brand == "apple"
+          and rep.model == "iPhone 15 Pro" and rep.storage_gb == 256)
+    check("HG screen_replaced detected",
+          "screen_replaced" in rep.defects)
+    check("HG condition defect", rep.condition == "defect")
+    check("HG no opportunity",
+          val.opportunity is False
+          and "condition_discount_unknown" in val.missing)
+    check("HG not original verdict", val.scam_verdict != "original")
+    check("HG scam flagged it",
+          any(("обфускац" in c or "перекуп" in c or "не родны" in c)
+              for c in val.cons))
+
+
 async def _main() -> None:
     await case_working_deal()
     await case_cosmetic_only_no_overvalue()
+    await case_homoglyph_screen_replaced()
     await case_broken_flip()
     await case_replica_fake()
     await case_icloud_for_parts()
