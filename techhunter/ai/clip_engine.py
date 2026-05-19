@@ -7,8 +7,10 @@ Label groups (one cached forward pass of text per group):
   screen   cracked vs intact display
   origin   real handheld photo vs official studio/stock image (scam tell)
 """
+import asyncio
 import io
 import logging
+import threading
 
 from .. import config
 
@@ -60,6 +62,8 @@ class ClipEngine:
             cls._instance = super().__new__(cls)
             cls._instance._loaded = False
             cls._instance._unavailable = False
+            # Guards model load across worker threads (no double load).
+            cls._instance._load_lock = threading.Lock()
         return cls._instance
 
     def _ensure_loaded(self) -> bool:
@@ -67,6 +71,14 @@ class ClipEngine:
             return True
         if self._unavailable:
             return False
+        with self._load_lock:
+            if self._loaded:
+                return True
+            if self._unavailable:
+                return False
+            return self._load()
+
+    def _load(self) -> bool:
         try:
             import torch
             from transformers import CLIPModel, CLIPProcessor
@@ -138,6 +150,13 @@ class ClipEngine:
         except Exception as e:
             log.debug("clip classify error: %s", e)
             return {}
+
+    async def classify_async(
+        self, image_bytes: bytes
+    ) -> dict[str, dict[str, float]]:
+        """Off-loop: model load + torch/PIL run in a worker thread so the
+        event loop (aiogram, captcha checks, timers) never freezes."""
+        return await asyncio.to_thread(self.classify, image_bytes)
 
 
 def get_clip_engine() -> ClipEngine:

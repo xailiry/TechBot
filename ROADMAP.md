@@ -162,3 +162,41 @@ Definition of Done: в карточке видно, насколько оцен�
   "выкуп вашей техники" = перекуп, противоречие "оригинал/идеал vs
   не родной экран"; при этих сигналах вердикт не "original".
   Регрессии добавлены, 8/8 зелёные. Дальше: только Backlog.
+- 2026-05-18: Начали MAJOR_FIXES, разбито на этапы. CLIP: оператор
+  выбрал вариант (б) - оставить, вынести в поток (Этап 2).
+- 2026-05-18: Этап 1 (P0-a) ГОТОВ. acquire_page больше не вешается:
+  get_nowait -> ожидание с таймаутом PAGE_ACQUIRE_TIMEOUT_SEC ->
+  одноразовая вкладка (нет дедлока пула); безопасный возврат при
+  подмене пула рестартом. Авто-перезапуск браузера при крахе
+  контекста: restart() с кулдауном BROWSER_RESTART_COOLDOWN_SEC,
+  _is_closed_error/_maybe_restart в search/fetch_details. Новый
+  набор test_browser_resilience, 9/9 зелёные. Не закоммичено
+  (коммит по слову оператора). Следующее: Этап 2 (CLIP в поток).
+- 2026-05-18: Этап 2 (P0-b) ГОТОВ. CLIP/torch/PIL/dhash больше не
+  морозят event loop: ClipEngine.classify_async через
+  asyncio.to_thread, загрузка модели под threading.Lock (нет
+  двойной загрузки из воркеров), убран on-loop геит engine.available
+  (грузил модель в цикле); get_image_hash и primary-dhash в
+  evaluate через asyncio.to_thread. Тест: concurrent ticker не
+  блокируется во время classify_async. 9/9 зелёные. Не закоммичено.
+- 2026-05-18: Этап 3 (P0-c) ГОТОВ. Надёжный детект блокировки:
+  has_listings/has_detail/is_block_page/page_blocked - капча только
+  при ОТСУТСТВИИ позитивного маркера + реальном сигнале блока (bare
+  datadome/captcha в бандлах больше не ложно срабатывает); пустая
+  выдача != капча. _probe_clear бьёт стабильный search-URL и ждёт
+  has_listings. CAPTCHA_MAX_WAIT_SEC дефолт 0->3600 (ночью не висит
+  вечно, ретрай в следующем цикле), уведомление троттлится
+  CAPTCHA_NOTIFY_INTERVAL_SEC. Watchdog: _watchdog_loop +
+  watchdog_decide (stall / dry-scrape = возможный бан), троттлинг,
+  Notifier.watchdog (Console+Telegram). Новый набор
+  test_block_watchdog, 10/10 зелёные. Не закоммичено.
+- 2026-05-18: Этап 4 (P0-d) ГОТОВ. P0 ПОЛНОСТЬЮ ЗАКРЫТ.
+  count_reused_images: точный матч по индексу + ограниченный fuzzy
+  на DHASH_FUZZY_LIMIT свежих строк (раньше O(n) на 5000 на каждый
+  лот). record_image_hash: одна строка хэша на лот (повторная
+  обработка из кэша не растит таблицу). cleanup_old_rows + фоновый
+  _maintenance_loop (CLEANUP_INTERVAL_SEC) чистит image_hashes/
+  price_observations(>= lookback+30д)/listings/card_state/sent_alerts
+  по ретенции. Тесты: dedup-одна-строка, exact-reuse, cleanup
+  старое-режет-свежее-оставляет. 10/10 зелёные. Не закоммичено.
+  Следующее: P1 (денежные баги) - Этап 5 по моему разбиению.

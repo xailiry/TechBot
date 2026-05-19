@@ -13,6 +13,8 @@ SUITES = [
     "tests.test_stage4",
     "tests.test_delivery",
     "tests.test_reliability",
+    "tests.test_browser_resilience",
+    "tests.test_block_watchdog",
     "tests.test_calibration",
     "tests.test_e2e_pipeline",
 ]

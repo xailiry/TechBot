@@ -35,6 +35,7 @@ class Notifier(Protocol):
     async def onboarding_finished(
         self, tg_id: int, query: str, summary: list
     ) -> None: ...
+    async def watchdog(self, text: str) -> None: ...
 
 
 def _beep() -> None:
@@ -111,3 +112,6 @@ class ConsoleNotifier:
     ) -> None:
         log.info("ONBOARDING done tg=%s %r: %d devices priced",
                  tg_id, query, len(summary))
+
+    async def watchdog(self, text: str) -> None:
+        log.warning("WATCHDOG: %s", text)

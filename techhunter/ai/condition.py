@@ -8,9 +8,9 @@ from .specs import DeviceSpecs
 _SEALED_KEYWORDS = ("идеал", "как новый", "новый", "запечатан", "не вскрыт")
 
 # A FOR_PARTS device cannot be resold as working without major work.
-_FOR_PARTS = {"no_power", "icloud_locked"}
+_FOR_PARTS = {"icloud_locked", "carrier_locked"}
 # A BROKEN device is intact-but-cracked: the key "cheap broken lot" signal.
-_BROKEN = {"screen_cracked", "back_glass_cracked"}
+_BROKEN = {"screen_cracked", "back_glass_cracked", "no_power"}
 _DEFECT = {
     "screen_replaced", "battery_replaced", "faceid_broken",
     "truetone_missing", "not_original_parts", "replica", "cosmetic_wear",

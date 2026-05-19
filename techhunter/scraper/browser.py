@@ -21,7 +21,12 @@ from .models import ParsedListing
 
 if TYPE_CHECKING:
     from ..notifier import Notifier
-from .parser import looks_blocked, looks_loading, parse_detail, parse_listings
+from .parser import (
+    has_listings,
+    page_blocked,
+    parse_detail,
+    parse_listings,
+)
 from .stealth import DESKTOP_UA, STEALTH_INIT
 from .urls import build_search_url
 
@@ -43,6 +48,50 @@ class AvitoBrowser:
         self._captcha_lock = asyncio.Lock()
         self._unblocked = asyncio.Event()
         self._unblocked.set()
+        # Crash recovery: serialize restarts, rate-limit them.
+        self._restart_lock = asyncio.Lock()
+        self._last_restart = 0.0
+        self._last_captcha_notify = 0.0
+
+    @staticmethod
+    def _is_closed_error(err: object) -> bool:
+        m = str(err).lower()
+        return any(
+            s in m
+            for s in (
+                "target page, context or browser has been closed",
+                "target closed", "targetclosederror",
+                "browser has been closed", "connection closed",
+                "page has been closed", "context has been closed",
+                "browser closed", "websocket",
+            )
+        )
+
+    async def _new_stealth_page(self) -> Page:
+        assert self._ctx is not None
+        page = await self._ctx.new_page()
+        with contextlib.suppress(Exception):
+            from playwright_stealth import Stealth
+
+            await Stealth().apply_stealth_async(page)
+        return page
+
+    async def restart(self) -> None:
+        """Recreate the browser after a crash. Rate-limited; concurrent
+        callers collapse into one restart."""
+        async with self._restart_lock:
+            now = time.time()
+            if now - self._last_restart < config.BROWSER_RESTART_COOLDOWN_SEC:
+                return
+            self._last_restart = now
+            log.warning("Browser: restarting (dead context/crash).")
+            await self.stop()
+            await self.start()
+
+    async def _maybe_restart(self, err: object) -> None:
+        if self._is_closed_error(err):
+            with contextlib.suppress(Exception):
+                await self.restart()
 
     # ─── lifecycle ──────────────────────────────────────────────────────────
 
@@ -90,9 +139,12 @@ class AvitoBrowser:
             self._available = asyncio.Queue()
             existing = list(self._ctx.pages)
             for i in range(config.PAGE_POOL_SIZE):
-                page = existing[i] if i < len(existing) else await self._ctx.new_page()
-                with contextlib.suppress(Exception):
-                    await Stealth().apply_stealth_async(page)
+                if i < len(existing):
+                    page = existing[i]
+                    with contextlib.suppress(Exception):
+                        await Stealth().apply_stealth_async(page)
+                else:
+                    page = await self._new_stealth_page()
                 self._available.put_nowait(page)
 
     async def stop(self) -> None:
@@ -110,11 +162,31 @@ class AvitoBrowser:
     async def acquire_page(self):
         await self.start()
         assert self._available is not None
-        page = await self._available.get()
+        q = self._available  # capture: a restart swaps this out
+        transient = False
+        try:
+            page = q.get_nowait()
+        except asyncio.QueueEmpty:
+            try:
+                page = await asyncio.wait_for(
+                    q.get(), timeout=config.PAGE_ACQUIRE_TIMEOUT_SEC
+                )
+            except asyncio.TimeoutError:
+                # Pool oversubscribed (onboarding + multi-sub + probe).
+                # Use a throwaway tab so we NEVER deadlock the monitor.
+                page = await self._new_stealth_page()
+                transient = True
+                log.debug("page pool exhausted; using transient tab")
         try:
             yield page
         finally:
-            self._available.put_nowait(page)
+            if transient or self._available is not q:
+                # Restart replaced the pool, or this was a throwaway tab:
+                # close it instead of poisoning the (new) pool.
+                with contextlib.suppress(Exception):
+                    await page.close()
+            else:
+                q.put_nowait(page)
 
     # ─── captcha suspension (session-wide, single-flight) ───────────────────
 
@@ -126,21 +198,23 @@ class AvitoBrowser:
             await asyncio.sleep(random.uniform(0.4, 1.0))
 
     async def _probe_clear(self) -> bool:
-        """Check if the IP block is gone WITHOUT touching the pooled tabs the
-        operator may be solving. Uses a throwaway tab on the Avito home."""
+        """Check if the IP block is gone WITHOUT touching the pooled tabs
+        the operator may be solving. Throwaway tab on a stable search URL;
+        'cleared' = the results marker actually rendered (positive signal),
+        not the absence of a substring."""
         if self._ctx is None:
             return False
         probe = None
         try:
             probe = await self._ctx.new_page()
             await probe.goto(
-                config.AVITO_BASE_URL,
+                config.AVITO_BASE_URL + config.AVITO_PROBE_PATH,
                 wait_until="domcontentloaded",
                 timeout=config.NAV_TIMEOUT_MS,
             )
             await asyncio.sleep(0.5)
             html = await probe.content()
-            return not looks_blocked(html) and not looks_loading(html)
+            return has_listings(html)
         except Exception:
             return False
         finally:
@@ -152,7 +226,15 @@ class AvitoBrowser:
         """First detector only: notify once, poll an out-of-band probe until
         the human solves the captcha on any one tab."""
         self.paused.set()
-        if self.notifier:
+        # Throttle: a long block re-enters the gate every cycle; do not
+        # spam the operator each time.
+        notified = False
+        if self.notifier and (
+            time.time() - self._last_captcha_notify
+            > config.CAPTCHA_NOTIFY_INTERVAL_SEC
+        ):
+            self._last_captcha_notify = time.time()
+            notified = True
             with contextlib.suppress(Exception):
                 await self.notifier.captcha_detected(url)
         deadline = (
@@ -164,11 +246,11 @@ class AvitoBrowser:
             while deadline is None or time.time() < deadline:
                 await asyncio.sleep(config.CAPTCHA_RECHECK_SEC)
                 if await self._probe_clear():
-                    if self.notifier:
+                    if notified and self.notifier:
                         with contextlib.suppress(Exception):
                             await self.notifier.captcha_cleared()
                     return True
-            log.warning("Captcha not solved within %ss, skipping this cycle.",
+            log.warning("Captcha not solved within %ss, will retry later.",
                         config.CAPTCHA_MAX_WAIT_SEC)
             return False
         finally:
@@ -257,15 +339,19 @@ class AvitoBrowser:
             html = await page.content()
         except Exception as e:
             log.warning("search %r p%d navigation failed: %s", query, page_num, e)
+            await self._maybe_restart(e)
             return []
 
-        if not looks_blocked(html) and not looks_loading(html):
+        if has_listings(html):
             return parse_listings(html)
+        if not page_blocked(html):
+            return []  # genuinely empty search, not a block -> no captcha
 
         # Blocked: session-wide gate (one notify), then this tab is reloaded.
         if await self._ensure_unblocked(page, url):
             with contextlib.suppress(Exception):
-                return parse_listings(await page.content())
+                new_html = await page.content()
+                return parse_listings(new_html) if has_listings(new_html) else []
         return []
 
     async def fetch_details(self, item: ParsedListing) -> ParsedListing:
@@ -281,7 +367,7 @@ class AvitoBrowser:
                     )
                 await asyncio.sleep(random.uniform(0.2, 0.5))
                 html = await page.content()
-                if looks_blocked(html) or looks_loading(html):
+                if page_blocked(html, detail=True):
                     if await self._ensure_unblocked(page, item.full_url):
                         html = await page.content()
                     else:
@@ -289,6 +375,7 @@ class AvitoBrowser:
                 return parse_detail(html, item)
             except Exception as e:
                 log.debug("fetch_details failed for %s: %s", item.id, e)
+                await self._maybe_restart(e)
                 return item
 
 

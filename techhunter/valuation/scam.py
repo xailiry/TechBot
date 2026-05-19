@@ -131,6 +131,9 @@ def score_listing(
     if _ICLOUD.search(full) or "icloud_locked" in defects:
         score -= 25
         cons.append("привязка iCloud / Activation Lock")
+    if "carrier_locked" in defects:
+        score -= 25
+        cons.append("заблокирован под оператора / R-SIM / MDM / демо")
     if _REFURB.search(full):
         score -= 8
         cons.append("реф/восстановленный")
@@ -211,7 +214,7 @@ def score_listing(
 
     # Claims "оригинал/идеал" while the screen/parts are NOT original.
     if (
-        ({"screen_replaced", "not_original_parts"} & set(defects))
+        ({"screen_replaced", "not_original_parts", "truetone_missing"} & set(defects))
         and (_any(full, _ORIG) or _IDEAL_CLAIM.search(full))
     ):
         score -= 22

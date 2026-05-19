@@ -88,3 +88,6 @@ class TelegramNotifier:
                 tg_id, onboarding_done_text(query, summary),
                 parse_mode="HTML",
             )
+
+    async def watchdog(self, text: str) -> None:
+        await self._broadcast(f"🛠 <b>Внимание</b>\n{text}")

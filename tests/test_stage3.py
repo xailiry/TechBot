@@ -36,6 +36,20 @@ def check(name: str, cond: bool) -> None:
         sys.exit(1)
 
 
+def test_age_seconds() -> None:
+    from datetime import datetime, timedelta, timezone
+
+    from techhunter.valuation.devices import _age_seconds
+
+    naive_now = datetime.now(timezone.utc).replace(tzinfo=None)
+    a = _age_seconds(naive_now)
+    check("naive utc age ~0 not negative", 0.0 <= a < 30)
+    old = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=2)
+    check("naive 2h ago ~7200", 7000 < _age_seconds(old) < 7400)
+    aware = datetime.now(timezone.utc) - timedelta(hours=1)
+    check("aware 1h ago ~3600", 3500 < _age_seconds(aware) < 3700)
+
+
 def test_clustering() -> None:
     bimodal = [5000, 5500, 6000, 48000, 50000, 52000, 51000, 49500]
     hi = cluster_high_median(bimodal)
@@ -168,9 +182,9 @@ async def test_repair() -> None:
     check("unknown repair -> total None", total2 is None and "back_glass" in miss2)
 
     _, _, _, blk = await estimate_repairs(
-        brand, "iPhone 13", ["screen_cracked", "faceid_broken"]
+        brand, "iPhone 13", ["screen_cracked", "icloud_locked"]
     )
-    check("faceid blocks flip", blk is True)
+    check("icloud blocks flip", blk is True)
 
 
 def _item(price, title="iPhone 13 Pro 128", desc="", **kw):
@@ -250,6 +264,7 @@ async def test_engine() -> None:
 
 
 def main() -> None:
+    test_age_seconds()
     test_clustering()
     test_shoplike()
     test_scam()

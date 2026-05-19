@@ -23,6 +23,7 @@ from .storage import (
     alert_already_sent,
     cache_listing,
     cache_listing_skipped,
+    cleanup_old_rows,
     get_cached_listing,
     get_delivery_prefs,
     mark_alert_sent,
@@ -287,10 +288,75 @@ async def poll_once(browser, notifier: Notifier) -> None:
     )
 
 
+def watchdog_decide(snap: dict, state: dict, now: float) -> list[str]:
+    """Pure: given a runtime snapshot + persistent state, return health
+    alerts to send (throttled). Mutates state (dry timer, last-alert times)."""
+    alerts: list[str] = []
+    last = state.setdefault("last_alert", {})
+
+    def _emit(key: str, text: str) -> None:
+        if now - last.get(key, 0.0) >= config.WATCHDOG_REPEAT_SEC:
+            last[key] = now
+            alerts.append(text)
+
+    captcha = bool(snap.get("captcha"))
+    lca = snap.get("last_cycle_at") or 0.0
+    if not captcha and lca > 0 and now - lca >= config.WATCHDOG_STALL_SEC:
+        _emit("stall", (
+            f"Монитор не завершал цикл ~{int((now - lca) // 60)} мин. "
+            "Похоже, завис."
+        ))
+
+    subs = snap.get("subs") or 0
+    scraped = snap.get("scraped") or 0
+    if captcha or subs == 0 or scraped > 0:
+        state["dry_since"] = None
+    else:
+        ds = state.get("dry_since")
+        if ds is None:
+            state["dry_since"] = now
+        elif now - ds >= config.WATCHDOG_DRY_SEC:
+            _emit("dry", (
+                f"Уже ~{int((now - ds) // 60)} мин ничего не собирается "
+                "при активных подписках. Возможен бан IP или смена "
+                "вёрстки Avito - проверь окно браузера."
+            ))
+    return alerts
+
+
+async def _watchdog_loop(notifier: Notifier) -> None:
+    state: dict = {}
+    while True:
+        await asyncio.sleep(config.WATCHDOG_CHECK_SEC)
+        try:
+            for text in watchdog_decide(
+                runtime.snapshot(), state, time.time()
+            ):
+                with contextlib.suppress(Exception):
+                    await notifier.watchdog(text)
+        except Exception as e:
+            log.debug("watchdog tick failed: %s", e)
+
+
+async def _maintenance_loop() -> None:
+    """Periodically prune old rows so SQLite stays small for long runs."""
+    while True:
+        await asyncio.sleep(config.CLEANUP_INTERVAL_SEC)
+        try:
+            deleted = await cleanup_old_rows()
+            total = sum(deleted.values())
+            if total:
+                log.info("cleanup: removed %d rows %s", total, deleted)
+        except Exception as e:
+            log.warning("cleanup failed: %s", e)
+
+
 async def run_forever(notifier: Notifier | None = None) -> None:
     notifier = notifier or ConsoleNotifier(beep=config.CAPTCHA_BEEP)
     browser = await get_browser(notifier)
     log.info("Monitor started. Poll interval %ss.", config.POLL_INTERVAL_SEC)
+    wd = asyncio.create_task(_watchdog_loop(notifier))
+    mt = asyncio.create_task(_maintenance_loop())
     try:
         while True:
             try:
@@ -299,6 +365,10 @@ async def run_forever(notifier: Notifier | None = None) -> None:
                 log.exception("poll_once crashed: %s", e)
             await asyncio.sleep(config.POLL_INTERVAL_SEC)
     finally:
+        for t in (wd, mt):
+            t.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await t
         await shutdown_browser()
         await dispose_engine()
 

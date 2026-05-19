@@ -20,8 +20,9 @@ logs/
 # Playwright persistent browser profile
 browser_profile/
 
-# Editors / OS
+# Editors / OS / tooling
 .idea/
 .vscode/
+.claude/
 .DS_Store
 Thumbs.db

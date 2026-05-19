@@ -20,12 +20,32 @@ from dataclasses import dataclass, field
 
 from ..textnorm import normalize_homoglyphs
 
-# ─── battery health ─────────────────────────────────────────────────────────
+# --- battery health ---------------------------------------------------------
 _BAT_WORD = r"(?:акб|аккумулятор[а-я]*|батаре[ияй]|battery(?:\s*health)?|ё?мкост[ьи](?:\s*акб)?)"
 _BAT_AFTER = re.compile(_BAT_WORD + r"[^0-9%]{0,12}(\d{1,3})\s*%?", re.I)
 _BAT_BEFORE = re.compile(r"(\d{1,3})\s*%[^0-9]{0,12}" + _BAT_WORD, re.I)
 
-# ─── storage / ram ──────────────────────────────────────────────────────────
+_CYCLES_RE = re.compile(
+    r"(?:цикл\w*|заряд\w*|cycle\w*|зарядок\b)[^\d]{0,10}(\d{1,4})|(\d{1,4})\s*(?:цикл\w*|заряд\w*|cycle\w*|зарядок\b)",
+    re.I,
+)
+
+
+def _extract_cycles(text: str) -> int | None:
+    for m in _CYCLES_RE.finditer(text):
+        g1, g2 = m.group(1), m.group(2)
+        v_str = g1 or g2
+        if v_str:
+            try:
+                v = int(v_str)
+                if 1 <= v <= 9999:
+                    return v
+            except ValueError:
+                continue
+    return None
+
+
+# --- storage / ram ----------------------------------------------------------
 _RAM_ROM = re.compile(r"\b(\d{1,2})\s*/\s*(\d{2,4})\s*(?:гб|gb)\b", re.I)
 _STORAGE = re.compile(r"\b(\d{2,4})\s*(гб|gb|тб|tb)\b", re.I)
 _RAM_ONLY = re.compile(r"\b(?:озу|ram)\s*[:\-]?\s*(\d{1,2})\b|\b(\d{1,2})\s*(?:гб|gb)\s*озу\b", re.I)
@@ -36,6 +56,10 @@ _VALID_STORAGE = {16, 32, 64, 128, 256, 512, 1024, 2048}
 _DEFECT_PATTERNS: list[tuple[str, str]] = [
     (r"icloud|айклауд|i-cloud|activation lock|залочен|привязан\w* к|"
      r"гугл[ао]?\s*аккаунт|frp", "icloud_locked"),
+    (r"\br[\s\-]?sim\b|\bр[\s\-]?сим\b|\bсим[\s\-]?лок\b|\bsim[\s\-]?lock\b|\bsimlock\b|"
+     r"\bmdm\b|\bмдм\b|\bgevey\b|\bгевей\b|\bгивей\b|турбосим|турбо[\s\-]?сим|\bldu\b|"
+     r"\bдемо\b|обход\s*активац|\bbypass\b|заблокирован\s+(?:на|под)\s+оператора",
+     "carrier_locked"),
     (r"на\s*зап\.?части|на\s*донор|по\s*запчаст", "no_power"),
     (r"не\s*включ|не\s*работает\s*(?:вообще|телефон|совсем)|нет\s*изображени|"
      r"не\s*запуска|dead\b|до[нр]ор", "no_power"),
@@ -64,6 +88,18 @@ _DEFECT_PATTERNS: list[tuple[str, str]] = [
 ]
 _DEFECT_RE = [(re.compile(p, re.I), code) for p, code in _DEFECT_PATTERNS]
 
+# Negated "it's fine" claims removed before the damage scan. Does NOT
+# touch "не родной"/"неоригинал"/"замена ..." (those are real defects).
+_NEG_CLEAN = re.compile(
+    r"\bне\s+мен[яеёи]\w*"
+    r"|\bбез\s+замен\w+"
+    r"|\bне\s+(?:разб\w+|треснут\w+|бит\w+|колот\w+)"
+    r"|\bбез\s+(?:r[\s\-]?sim|р[\s\-]?сим|mdm|мдм|сим[\s\-]?лок|sim[\s\-]?lock|чип\w*|обход\w*)\b"
+    r"|\bне\s+(?:залочен\w*|заблокирован\w*)"
+    r"|\bneverlock\b|\bневерлок\b",
+    re.I,
+)
+
 _ROSTEST_RE = re.compile(r"ростест|rst\b|для\s*рф\b|росси[йяи]\w*\s*верс", re.I)
 _SEALED_RE = re.compile(r"запечатан|новый\s*в\s*плёнк|новый\s*в\s*пленк|sealed|"
                         r"не\s*вскрыт|новый,?\s*не\s*актив", re.I)
@@ -82,6 +118,7 @@ class DeviceSpecs:
     storage_gb: int | None = None
     ram_gb: int | None = None
     battery_health: int | None = None
+    battery_cycles: int | None = None
     color: str | None = None
     defects: set[str] = field(default_factory=set)
     is_rostest: bool = False
@@ -180,20 +217,20 @@ def extract_specs(
     specs.storage_gb = p_storage if p_storage is not None else t_storage
     specs.ram_gb = p_ram if p_ram is not None else t_ram
     specs.battery_health = _extract_battery(text)
+    specs.battery_cycles = _extract_cycles(text)
     specs.is_rostest = bool(_ROSTEST_RE.search(text))
     specs.is_sealed = bool(_SEALED_RE.search(text))
 
+    # Neutralize explicit "it is fine" claims so they do not trigger
+    # physical-damage defects ("экран не менялся", "без замены дисплея",
+    # "не разбит/не битый"). True defects ("не родной", "неоригинал",
+    # "замена дисплея") are untouched.
+    defect_text = _NEG_CLEAN.sub(" ", text)
     for rx, code in _DEFECT_RE:
-        if rx.search(text):
+        if rx.search(defect_text):
             specs.defects.add(code)
 
-    from .. import config
 
-    if (
-        specs.battery_health is not None
-        and specs.battery_health <= config.BATTERY_DEFECT_THRESHOLD
-    ):
-        specs.defects.add("battery_replaced")
 
     for word, norm in _COLOR_KEYWORDS.items():
         if word in text:

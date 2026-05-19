@@ -195,6 +195,55 @@ def parse_detail(html: str, item: ParsedListing) -> ParsedListing:
 
 # ─── Page state checks ──────────────────────────────────────────────────────
 
+def has_listings(html: str | None) -> bool:
+    """Positive signal that the search results page actually rendered."""
+    if not html:
+        return False
+    return (
+        'data-marker="item"' in html
+        or 'data-marker="catalog-serp"' in html
+    )
+
+
+def has_detail(html: str | None) -> bool:
+    """Positive signal that an item page actually rendered."""
+    if not html:
+        return False
+    return (
+        'data-marker="item-view/' in html
+        or 'data-marker="item-view/title-info"' in html
+    )
+
+
+def is_block_page(html: str | None) -> bool:
+    """Tight block/antibot detection. Unlike looks_blocked it does NOT
+    trip on bare 'captcha'/'datadome' substrings (those live in legit
+    Avito bundles); it requires a real interstitial signal."""
+    if not html:
+        return False
+    s = html[:16000].lower()
+    return any(
+        m in s
+        for m in (
+            "captcha-delivery", "geo.captcha-delivery", "px-captcha",
+            'data-marker="captcha"', "доступ ограничен",
+            "проблема с ip", "подозрительн", "вы не робот",
+            "слишком много запрос", "ip заблокир", "are you a robot",
+            "access denied",
+        )
+    )
+
+
+def page_blocked(html: str | None, *, detail: bool = False) -> bool:
+    """Robust decision for the captcha gate: blocked only if the positive
+    result marker is ABSENT and a real block/loading signal is present.
+    An empty search (no results, no block) returns False -> not a captcha."""
+    positive = has_detail(html) if detail else has_listings(html)
+    if positive:
+        return False
+    return is_block_page(html) or looks_loading(html)
+
+
 def looks_blocked(html: str | None) -> bool:
     if not html:
         return False

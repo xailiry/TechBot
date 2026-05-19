@@ -2,7 +2,9 @@
 import json
 import logging
 
-from sqlalchemy import select
+from datetime import datetime, timedelta, timezone
+
+from sqlalchemy import delete, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from . import config
@@ -13,6 +15,7 @@ from .db.models import (
     DealFeedback,
     ImageHash,
     Listing,
+    PriceObservation,
     SentAlert,
     Subscription,
     User,
@@ -175,30 +178,77 @@ async def cache_listing_skipped(item: ParsedListing) -> None:
 
 
 async def count_reused_images(listing_id: str, img_hash: str) -> int:
-    """How many OTHER listings already carry a near-identical photo
-    (Hamming <= DHASH_MAX_DISTANCE). Strong photo-reuse / scam signal."""
+    """How many OTHER listings carry the same photo. Exact-hash match
+    first (uses the index, O(matches), catches the common scam of the
+    identical file), then a bounded fuzzy near-dup pass on the most
+    recent rows only - so cost stays bounded as the table grows."""
     if not img_hash:
         return 0
+    others: set[str] = set()
     async with get_session() as s:
-        rows = await s.execute(
-            select(ImageHash.listing_id, ImageHash.img_hash)
-            .order_by(ImageHash.id.desc())
-            .limit(config.DHASH_SCAN_LIMIT)
+        exact = await s.execute(
+            select(ImageHash.listing_id)
+            .where(
+                ImageHash.img_hash == img_hash,
+                ImageHash.listing_id != listing_id,
+            )
         )
-        others: set[str] = set()
-        for other_id, other_hash in rows.all():
-            if other_id == listing_id:
-                continue
-            if hamming(img_hash, other_hash) <= config.DHASH_MAX_DISTANCE:
-                others.add(other_id)
-        return len(others)
+        others.update(r[0] for r in exact.all())
+
+        if config.DHASH_MAX_DISTANCE > 0:
+            recent = await s.execute(
+                select(ImageHash.listing_id, ImageHash.img_hash)
+                .order_by(ImageHash.id.desc())
+                .limit(config.DHASH_FUZZY_LIMIT)
+            )
+            for other_id, other_hash in recent.all():
+                if other_id == listing_id or other_id in others:
+                    continue
+                if hamming(img_hash, other_hash) <= config.DHASH_MAX_DISTANCE:
+                    others.add(other_id)
+    return len(others)
 
 
 async def record_image_hash(listing_id: str, img_hash: str) -> None:
+    """One hash row per listing is enough; skip if it already has one
+    (re-processing on cache expiry must not grow the table)."""
     if not img_hash:
         return
     async with get_session() as s:
+        exists = await s.execute(
+            select(ImageHash.id)
+            .where(ImageHash.listing_id == listing_id)
+            .limit(1)
+        )
+        if exists.first() is not None:
+            return
         s.add(ImageHash(listing_id=listing_id, img_hash=img_hash))
+
+
+async def cleanup_old_rows() -> dict[str, int]:
+    """Prune rows beyond their retention windows so SQLite stays small
+    over long unattended runs. Returns deleted counts per table."""
+    now = datetime.now(timezone.utc)
+
+    def _cut(days: int) -> datetime:
+        return now - timedelta(days=days)
+
+    plan = [
+        (ImageHash, ImageHash.created_at,
+         config.IMAGE_HASH_RETENTION_DAYS),
+        (PriceObservation, PriceObservation.observed_at,
+         config.PRICE_OBS_RETENTION_DAYS),
+        (Listing, Listing.last_seen, config.LISTINGS_RETENTION_DAYS),
+        (CardState, CardState.created_at,
+         config.CARD_STATE_RETENTION_DAYS),
+        (SentAlert, SentAlert.sent_at, config.SENT_ALERT_RETENTION_DAYS),
+    ]
+    out: dict[str, int] = {}
+    async with get_session() as s:
+        for model, col, days in plan:
+            res = await s.execute(delete(model).where(col < _cut(days)))
+            out[model.__tablename__] = res.rowcount or 0
+    return out
 
 
 # ─── Telegram bot helpers (Stage 4) ─────────────────────────────────────────

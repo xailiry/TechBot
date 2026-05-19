@@ -18,9 +18,11 @@ REPAIRABLE: dict[str, str] = {
     "screen_cracked": "screen",
     "back_glass_cracked": "back_glass",
     "battery_replaced": "battery",
+    "faceid_broken": "faceid",
+    "no_power": "no_power",
 }
 # Defects that block a cheap flip-to-working regardless of repair prices.
-FLIP_BLOCKING = {"faceid_broken"}
+FLIP_BLOCKING = {"icloud_locked", "carrier_locked"}
 
 
 async def get_repair_cost(

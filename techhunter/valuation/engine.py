@@ -162,11 +162,13 @@ async def value_listing(
             missing.append("repair_cost_unknown")
             v.opportunity_type = "broken_flip"  # informational only
         elif not breakdown:
-            # Defect with no priced physical repair path (e.g. only
-            # cosmetic wear / non-original screen / no True Tone). We
-            # cannot quantify the condition discount from real data, so
-            # we do NOT claim a profit instead of fabricating one.
-            missing.append("condition_discount_unknown")
+            defect_baseline = v.condition_baselines.get("defect")
+            if cond == "defect" and defect_baseline is not None:
+                if item.price > 0:
+                    v.net_profit = defect_baseline - item.price - overhead
+                    v.opportunity_type = "working"
+            else:
+                missing.append("condition_discount_unknown")
         else:
             v.repair_cost = total
             if item.price > 0:

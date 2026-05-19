@@ -35,7 +35,7 @@ def test_specs() -> None:
     check("faceid_broken", "faceid_broken" in s.defects)
     check("battery 89 not defect", "battery_replaced" not in s.defects)
 
-    s2 = extract_specs("Samsung S23", "8/256 ГБ, акб 70%, разбит экран")
+    s2 = extract_specs("Samsung S23", "8/256 ГБ, акб под замену, разбит экран")
     check("ram 8", s2.ram_gb == 8)
     check("storage 256 (ram/rom)", s2.storage_gb == 256)
     check("low battery -> defect", "battery_replaced" in s2.defects)
@@ -48,6 +48,23 @@ def test_specs() -> None:
     s4 = extract_specs("iPhone 15 новый запечатан ростест", "")
     check("sealed", s4.is_sealed is True)
     check("rostest", s4.is_rostest is True)
+
+    # Negated "it's fine" claims must NOT raise damage defects.
+    sneg = extract_specs(
+        "iPhone 13 Pro 128",
+        "экран не менялся, не разбит, всё родное, без замены дисплея",
+    )
+    check("no false screen_replaced",
+          "screen_replaced" not in sneg.defects)
+    check("no false screen_cracked",
+          "screen_cracked" not in sneg.defects)
+    # But genuine defects still detected.
+    check("real replaced still caught",
+          "screen_replaced" in extract_specs(
+              "iPhone 13", "дисплей не родной, ставили аналог").defects)
+    check("real cracked still caught",
+          "screen_cracked" in extract_specs(
+              "iPhone 13", "разбит экран, трещина").defects)
 
     # Structured "Характеристики" must win over title heuristics.
     s5 = extract_specs(
@@ -169,6 +186,35 @@ def test_clip_degrade() -> None:
           all(v is None for v in flags.values()) and "is_box_only" in flags)
 
 
+async def test_clip_async_offloads() -> None:
+    # classify_async must not block the loop and degrade to {} when
+    # unavailable; a concurrent loop task keeps ticking meanwhile.
+    eng = get_clip_engine()
+    eng._unavailable = True
+    eng._loaded = False
+    ticks = 0
+
+    async def _ticker():
+        nonlocal ticks
+        for _ in range(5):
+            await asyncio.sleep(0.01)
+            ticks += 1
+
+    t = asyncio.create_task(_ticker())
+    res = await eng.classify_async(_png((4, 5, 6)))
+    await t
+    check("classify_async degrades to {}", res == {})
+    check("loop kept ticking (not blocked)", ticks == 5)
+    check("has load lock", eng._load_lock is not None)
+
+    from techhunter.ai.images import get_image_hash
+
+    h = await get_image_hash("", precomputed=_png((9, 9, 9)))
+    check("get_image_hash offloaded ok", h is not None and len(h) == 16)
+    check("get_image_hash junk -> None",
+          await get_image_hash("", precomputed=b"notimg") is None)
+
+
 async def test_evaluate_textonly() -> None:
     item = ParsedListing(
         id="ev-1",
@@ -185,6 +231,17 @@ async def test_evaluate_textonly() -> None:
     check("eval condition IDEAL", r.condition == "ideal")
     check("eval visual empty", r.visual == {})
     check("eval reused 0", r.reused_image_count == 0)
+
+    # Test low battery numerical grading in evaluate_listing
+    item_low_bat = ParsedListing(
+        id="ev-low-bat",
+        title="Samsung S23",
+        price=30000,
+        url="/x/2",
+        description="8/256 ГБ, акб 70%, разбит экран",
+    )
+    r_low_bat = await evaluate_listing(item_low_bat, run_clip=False, do_dedup=False)
+    check("low battery -> defect in evaluate_listing", "battery_replaced" in r_low_bat.defects)
 
 
 async def test_dedup_db() -> None:
@@ -209,6 +266,7 @@ def main() -> None:
     test_dhash()
     test_clip_embed_coercion()
     test_clip_degrade()
+    asyncio.run(test_clip_async_offloads())
     asyncio.run(test_evaluate_textonly())
     asyncio.run(test_dedup_db())
     print("\nAll Stage 2 checks passed.")

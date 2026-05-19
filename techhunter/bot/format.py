@@ -25,10 +25,19 @@ DEFECT_RU = {
     "faceid_broken": "Face ID не работает",
     "truetone_missing": "нет True Tone",
     "icloud_locked": "привязка iCloud",
+    "carrier_locked": "блокировка оператора / R-SIM / MDM",
     "not_original_parts": "неоригинальные запчасти",
     "replica": "реплика/копия",
     "no_power": "не включается",
     "cosmetic_wear": "косметические дефекты",
+}
+
+REPAIR_NAME_RU = {
+    "screen": "экран",
+    "back_glass": "задняя крышка",
+    "battery": "АКБ",
+    "faceid": "Face ID",
+    "no_power": "плата/питание",
 }
 
 MISSING_RU = {
@@ -86,7 +95,7 @@ def format_deal_card(item, report, valuation, sub_query: str = "") -> str:
             )
             if valuation.repair_cost is not None:
                 rb = ", ".join(
-                    f"{k} {fmt_price(v)}"
+                    f"{REPAIR_NAME_RU.get(k, k)} {fmt_price(v)}"
                     for k, v in valuation.repair_breakdown.items()
                 )
                 lines.append(

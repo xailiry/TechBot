@@ -34,6 +34,13 @@ BROWSER_PROFILE_DIR = os.getenv("BROWSER_PROFILE_DIR", str(DATA_DIR / "browser_p
 # Prefer real installed Chrome; code falls back to bundled Chromium if absent.
 BROWSER_CHANNEL = os.getenv("BROWSER_CHANNEL", "chrome")
 PAGE_POOL_SIZE = int(os.getenv("PAGE_POOL_SIZE", "5"))
+# If the page pool is exhausted, wait this long, then use a transient
+# throwaway tab instead of blocking forever (no deadlock).
+PAGE_ACQUIRE_TIMEOUT_SEC = float(os.getenv("PAGE_ACQUIRE_TIMEOUT_SEC", "20"))
+# Min seconds between automatic browser restarts (crash recovery).
+BROWSER_RESTART_COOLDOWN_SEC = int(
+    os.getenv("BROWSER_RESTART_COOLDOWN_SEC", "30")
+)
 NAV_TIMEOUT_MS = int(os.getenv("NAV_TIMEOUT_MS", "30000"))
 
 # Avito search URL params.
@@ -61,10 +68,28 @@ LISTING_CACHE_TTL_SEC = int(os.getenv("LISTING_CACHE_TTL_SEC", "1800"))
 # ─── Captcha suspension ─────────────────────────────────────────────────────
 # How often to re-check whether a human solved the captcha.
 CAPTCHA_RECHECK_SEC = int(os.getenv("CAPTCHA_RECHECK_SEC", "8"))
-# 0 = wait indefinitely for manual solve (recommended for the visible workflow).
-CAPTCHA_MAX_WAIT_SEC = int(os.getenv("CAPTCHA_MAX_WAIT_SEC", "0"))
+# Max wait for a manual solve before giving up THIS cycle (it retries next
+# cycle). 0 = wait indefinitely. Finite default so an unattended night
+# does not stall the bot forever.
+CAPTCHA_MAX_WAIT_SEC = int(os.getenv("CAPTCHA_MAX_WAIT_SEC", "3600"))
+# Do not re-notify the operator about captcha more often than this.
+CAPTCHA_NOTIFY_INTERVAL_SEC = int(
+    os.getenv("CAPTCHA_NOTIFY_INTERVAL_SEC", "1800")
+)
+# Stable URL used to probe whether the IP block is gone (has_listings).
+AVITO_PROBE_PATH = os.getenv("AVITO_PROBE_PATH", "/rossiya/telefony?s=104")
 # Audible beep on captcha so the operator notices (Windows only).
 CAPTCHA_BEEP = os.getenv("CAPTCHA_BEEP", "True").lower() in ("true", "1", "yes")
+
+# ─── Watchdog (unattended health alerts) ────────────────────────────────────
+WATCHDOG_CHECK_SEC = int(os.getenv("WATCHDOG_CHECK_SEC", "300"))
+# No completed poll cycle for this long -> "monitor stuck" alert.
+WATCHDOG_STALL_SEC = int(os.getenv("WATCHDOG_STALL_SEC", "900"))
+# Consecutive cycles scraping 0 items (subs exist, not captcha) for this
+# long -> "nothing collected, possible IP ban / layout change" alert.
+WATCHDOG_DRY_SEC = int(os.getenv("WATCHDOG_DRY_SEC", "1800"))
+# Min seconds between repeats of the same watchdog alert.
+WATCHDOG_REPEAT_SEC = int(os.getenv("WATCHDOG_REPEAT_SEC", "3600"))
 
 # ─── AI evaluation (Stage 2, local only) ────────────────────────────────────
 # Battery health at/under this % counts as a condition defect.
@@ -76,8 +101,17 @@ MAX_IMAGES_FOR_CLIP = int(os.getenv("MAX_IMAGES_FOR_CLIP", "3"))
 IMAGE_DOWNLOAD_TIMEOUT = float(os.getenv("IMAGE_DOWNLOAD_TIMEOUT", "10.0"))
 # dhash Hamming distance at/under which two photos are "the same" (reused).
 DHASH_MAX_DISTANCE = int(os.getenv("DHASH_MAX_DISTANCE", "2"))
-# How many recent stored hashes to scan when detecting photo reuse.
-DHASH_SCAN_LIMIT = int(os.getenv("DHASH_SCAN_LIMIT", "5000"))
+# Exact-hash match uses the index (cheap, common scam case). The fuzzy
+# near-dup pass is bounded to this many most-recent rows.
+DHASH_FUZZY_LIMIT = int(os.getenv("DHASH_FUZZY_LIMIT", "1500"))
+DHASH_SCAN_LIMIT = DHASH_FUZZY_LIMIT  # back-compat alias
+
+# ─── DB retention (keep SQLite small for long unattended runs) ───────────────
+CLEANUP_INTERVAL_SEC = int(os.getenv("CLEANUP_INTERVAL_SEC", str(6 * 3600)))
+IMAGE_HASH_RETENTION_DAYS = int(os.getenv("IMAGE_HASH_RETENTION_DAYS", "21"))
+LISTINGS_RETENTION_DAYS = int(os.getenv("LISTINGS_RETENTION_DAYS", "14"))
+CARD_STATE_RETENTION_DAYS = int(os.getenv("CARD_STATE_RETENTION_DAYS", "7"))
+SENT_ALERT_RETENTION_DAYS = int(os.getenv("SENT_ALERT_RETENTION_DAYS", "30"))
 
 # ─── Valuation (Stage 3) ────────────────────────────────────────────────────
 # Reseller overhead per flip (cleaning, shipping, fees) in RUB. Real number;
@@ -96,6 +130,11 @@ CONF_MED_SAMPLE = int(os.getenv("CONF_MED_SAMPLE", "12"))
 CONF_FRESH_DAYS = int(os.getenv("CONF_FRESH_DAYS", "3"))
 BASELINE_LOOKBACK_DAYS = int(os.getenv("BASELINE_LOOKBACK_DAYS", "120"))
 BASELINE_MAX_SAMPLE = int(os.getenv("BASELINE_MAX_SAMPLE", "600"))
+# Prune observations older than this. MUST stay >= lookback so learning
+# is unaffected; only truly dead data is removed.
+PRICE_OBS_RETENTION_DAYS = int(
+    os.getenv("PRICE_OBS_RETENTION_DAYS", str(BASELINE_LOOKBACK_DAYS + 30))
+)
 # Re-learn a stored baseline if older than this (continuous learning).
 BASELINE_REFRESH_SEC = int(os.getenv("BASELINE_REFRESH_SEC", str(30 * 60)))
 # Absolute sanity for learning: drop placeholder/typo prices (1 RUB, 1 mln).

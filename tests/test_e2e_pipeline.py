@@ -44,7 +44,7 @@ def check(name: str, cond: bool) -> None:
 
 
 async def _main() -> None:
-    dev = await get_or_create_device("apple", "iPhone 13 Pro", 256)
+    dev = await get_or_create_device("apple", "iPhone 13 Pro [RST]", 256)
     await set_manual_baseline(dev, 82000)
 
     items = parse_listings(SEARCH_HTML)
@@ -59,7 +59,7 @@ async def _main() -> None:
 
     it0, rep0, val0, txt0 = cards[0]
     check("e2e price parsed", it0.price == 63000)
-    check("e2e model normalized", rep0.model == "iPhone 13 Pro")
+    check("e2e model normalized", rep0.model == "iPhone 13 Pro [RST]")
     check("e2e battery from title", rep0.battery_health == 92)
     check("e2e working profit", val0.net_profit == 19000
           and val0.opportunity is True)

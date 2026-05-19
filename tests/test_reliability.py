@@ -84,9 +84,97 @@ async def test_per_user_dedup() -> None:
     await mark_alert_sent(a, lid)  # idempotent, no error
 
 
+async def test_sqlite_pragmas() -> None:
+    from sqlalchemy import text
+
+    from techhunter.db import get_session
+
+    async with get_session() as s:
+        jm = (await s.execute(text("PRAGMA journal_mode"))).scalar()
+        bt = (await s.execute(text("PRAGMA busy_timeout"))).scalar()
+    check("WAL enabled", str(jm).lower() == "wal")
+    check("busy_timeout set", int(bt) >= 5000)
+
+
+async def test_image_hash_dedup_and_reuse() -> None:
+    from techhunter.storage import count_reused_images, record_image_hash
+
+    a = f"ih-{uuid.uuid4().hex}"
+    h = f"{uuid.uuid4().int & ((1 << 64) - 1):016x}"
+    await record_image_hash(a, h)
+    await record_image_hash(a, "ffffffffffffffff")  # same listing -> skipped
+
+    from sqlalchemy import func, select
+
+    from techhunter.db import get_session
+    from techhunter.db.models import ImageHash
+
+    async with get_session() as s:
+        n = (
+            await s.execute(
+                select(func.count())
+                .select_from(ImageHash)
+                .where(ImageHash.listing_id == a)
+            )
+        ).scalar()
+    check("one hash row per listing", n == 1)
+
+    b = f"ih-{uuid.uuid4().hex}"
+    check("exact reuse detected (other listing)",
+          await count_reused_images(b, h) == 1)
+    check("self not counted", await count_reused_images(a, h) == 0)
+    check("empty hash -> 0", await count_reused_images(b, "") == 0)
+
+
+async def test_cleanup_old_rows() -> None:
+    from datetime import datetime, timedelta, timezone
+
+    from techhunter.db import get_session
+    from techhunter.db.models import CardState, ImageHash, SentAlert
+    from techhunter.storage import cleanup_old_rows
+
+    old = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
+        days=400
+    )
+    tag = uuid.uuid4().hex[:8]
+    async with get_session() as s:
+        s.add(ImageHash(listing_id=f"old-{tag}", img_hash="0" * 16,
+                        created_at=old))
+        s.add(ImageHash(listing_id=f"new-{tag}", img_hash="1" * 16))
+        s.add(CardState(tg_id=10**9 + 1, message_id=int(tag, 16) % 100000,
+                        item_json="{}", score_json="{}", created_at=old))
+        s.add(SentAlert(tg_id=10**9 + 1, listing_id=f"sa-old-{tag}",
+                        sent_at=old))
+
+    deleted = await cleanup_old_rows()
+    check("cleanup returns per-table counts",
+          "image_hashes" in deleted and "sent_alerts" in deleted)
+
+    from sqlalchemy import func, select
+
+    async with get_session() as s:
+        old_ih = (
+            await s.execute(
+                select(func.count()).select_from(ImageHash)
+                .where(ImageHash.listing_id == f"old-{tag}")
+            )
+        ).scalar()
+        new_ih = (
+            await s.execute(
+                select(func.count()).select_from(ImageHash)
+                .where(ImageHash.listing_id == f"new-{tag}")
+            )
+        ).scalar()
+    check("old image hash pruned", old_ih == 0)
+    check("fresh image hash kept", new_ih == 1)
+
+
 def main() -> None:
     asyncio.run(test_cache_and_retry())
     asyncio.run(test_per_user_dedup())
+    asyncio.run(test_sqlite_pragmas())
+    asyncio.run(test_image_hash_dedup_and_reuse())
+    asyncio.run(test_cleanup_old_rows())
     print("\nAll reliability checks passed.")
 
 

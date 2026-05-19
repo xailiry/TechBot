@@ -3,6 +3,7 @@
 dhash detects the same photo reused across different sellers, a strong scam
 signal consumed in Stage 3.
 """
+import asyncio
 import io
 import logging
 
@@ -91,7 +92,8 @@ async def get_image_hash(
     content = precomputed or await download_image_bytes(url)
     if not content:
         return None
-    return dhash_bytes(content)
+    # PIL decode/resize is CPU-bound -> off the event loop.
+    return await asyncio.to_thread(dhash_bytes, content)
 
 
 def hamming(h1: str | None, h2: str | None) -> int:

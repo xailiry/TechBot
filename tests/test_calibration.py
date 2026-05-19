@@ -40,7 +40,7 @@ async def _seed_baseline(brand, model, storage, price):
 
 
 async def case_working_deal() -> None:
-    await _seed_baseline("apple", "iPhone 13 Pro", 256, 80000)
+    await _seed_baseline("apple", "iPhone 13 Pro [RST]", 256, 80000)
     it = _item(
         "iPhone 13 Pro 256GB",
         "Идеал, акб 91%, ростест, чек и коробка, Face ID работает, "
@@ -52,10 +52,10 @@ async def case_working_deal() -> None:
     check("WD battery 91", rep.battery_health == 91)
     check("WD no defects", rep.defects == [])
     check("WD condition ideal", rep.condition == "ideal")
-    check("WD model", rep.model == "iPhone 13 Pro" and rep.storage_gb == 256)
+    check("WD model", rep.model == "iPhone 13 Pro [RST]" and rep.storage_gb == 256)
     check("WD net 18000", val.net_profit == 18000)
     check("WD opportunity working",
-          val.opportunity is True and val.opportunity_type == "working")
+      val.opportunity is True and val.opportunity_type == "working")
     check("WD not fake", val.scam_verdict != "fake")
 
 
@@ -133,7 +133,7 @@ async def case_spec_extraction() -> None:
     check("SE storage 256", rep.storage_gb == 256)
     check("SE battery 100", rep.battery_health == 100)
     check("SE rostest", rep.is_rostest is True)
-    check("SE model S23 Ultra", rep.model == "Galaxy S23 Ultra")
+    check("SE model S23 Ultra", rep.model == "Galaxy S23 Ultra [RST]")
 
 
 async def case_repair_unknown() -> None:
@@ -192,11 +192,117 @@ async def case_homoglyph_screen_replaced() -> None:
     check("HG condition defect", rep.condition == "defect")
     check("HG no opportunity",
           val.opportunity is False
-          and "condition_discount_unknown" in val.missing)
+          and ("condition_discount_unknown" in val.missing or "repair_cost_unknown" in val.missing))
     check("HG not original verdict", val.scam_verdict != "original")
     check("HG scam flagged it",
           any(("обфускац" in c or "перекуп" in c or "не родны" in c)
               for c in val.cons))
+
+
+async def case_carrier_lock() -> None:
+    # Seed baseline
+    await _seed_baseline("apple", "iPhone 13 Pro", 256, 80000)
+
+    # 1. Check positive unlocked claims (neverlock, без rsim) don't trigger carrier_locked
+    it_clean = _item(
+        "iPhone 13 Pro 256GB Neverlock",
+        "Отличное состояние, без r-sim, чистый айфон, без мдм",
+        62000,
+    )
+    rep_clean = await evaluate_listing(it_clean, run_clip=False, do_dedup=False)
+    check("CL neverlock clean", "carrier_locked" not in rep_clean.defects)
+
+    # 2. Check locked claims do trigger carrier_locked
+    it_locked = _item(
+        "iPhone 13 Pro 256GB R-SIM",
+        "Телефон сша, работает через чип рсим, симлок, mdm блокировка",
+        35000,
+    )
+    rep_locked = await evaluate_listing(it_locked, run_clip=False, do_dedup=False)
+    val_locked = await value_listing(it_locked, rep_locked, log_obs=False)
+    check("CL rsim detected", "carrier_locked" in rep_locked.defects)
+    check("CL rsim condition for_parts", rep_locked.condition == "for_parts")
+    check("CL rsim opportunity blocked", val_locked.opportunity is False)
+    check("CL rsim scam penalized", val_locked.scam_score < 40 and any("оператор" in c for c in val_locked.cons))
+
+
+async def case_regional_variants() -> None:
+    it_rst = _item("iPhone 13 Pro ростест", "Идеальное состояние, рст версия", 60000)
+    rep_rst = await evaluate_listing(it_rst, run_clip=False, do_dedup=False)
+    check("RST suffix model", rep_rst.model == "iPhone 13 Pro [RST]")
+
+    it_esim = _item("iPhone 14 Pro eSIM", "американец, esim only, без физ сим", 70000)
+    rep_esim = await evaluate_listing(it_esim, run_clip=False, do_dedup=False)
+    check("eSIM suffix model", rep_esim.model == "iPhone 14 Pro [eSIM]")
+
+    it_ref = _item("iPhone 13 Pro реф", "восстановленный телефон cpo", 50000)
+    rep_ref = await evaluate_listing(it_ref, run_clip=False, do_dedup=False)
+    check("Ref suffix model", rep_ref.model == "iPhone 13 Pro [Ref]")
+
+
+async def case_battery_cycles_fraud() -> None:
+    it = _item("iPhone 13 128GB", "АКБ 96%, 350 циклов перезарядки", 40000)
+    rep = await evaluate_listing(it, run_clip=False, do_dedup=False)
+    check("Cycles parsed", rep.battery_cycles == 350)
+    check("Cycles fraud detected defect", "battery_replaced" in rep.defects)
+
+
+async def case_dynamic_battery_threshold() -> None:
+    await _seed_baseline("apple", "iPhone 15 Pro", 256, 90000)
+    it_ip15 = _item("iPhone 15 Pro 256GB", "Идеал, акб 84%, без нюансов", 75000)
+    rep_ip15 = await evaluate_listing(it_ip15, run_clip=False, do_dedup=False)
+    check("iPhone 15 Pro battery defect", "battery_replaced" in rep_ip15.defects)
+    check("iPhone 15 Pro battery condition defect", rep_ip15.condition == "defect")
+
+    await _seed_baseline("apple", "iPhone 11", 128, 25000)
+    it_ip11_78 = _item("iPhone 11 128GB", "Хорошее сост, акб 78%", 15000)
+    rep_ip11_78 = await evaluate_listing(it_ip11_78, run_clip=False, do_dedup=False)
+    check("iPhone 11 battery defect <= 79", "battery_replaced" in rep_ip11_78.defects)
+
+    it_ip11_80 = _item("iPhone 11 128GB", "Хорошее сост, акб 80%", 16000)
+    rep_ip11_80 = await evaluate_listing(it_ip11_80, run_clip=False, do_dedup=False)
+    check("iPhone 11 battery ok >= 80", "battery_replaced" not in rep_ip11_80.defects)
+
+
+async def case_repairable_gems() -> None:
+    await _seed_baseline("apple", "iPhone 13", 128, 55000)
+    await set_repair_cost("apple", "iPhone 13", "faceid", 5000)
+    it_faceid = _item("iPhone 13 128GB", "Не работает Face ID, остальное отлично", 35000)
+    rep_faceid = await evaluate_listing(it_faceid, run_clip=False, do_dedup=False)
+    val_faceid = await value_listing(it_faceid, rep_faceid, log_obs=False)
+    check("FaceID defect code", "faceid_broken" in rep_faceid.defects)
+    check("FaceID condition defect", rep_faceid.condition == "defect")
+    check("FaceID repair flips", val_faceid.opportunity is True and val_faceid.opportunity_type == "broken_flip")
+    check("FaceID net matches repair cost", val_faceid.net_profit == 55000 - 35000 - 5000)
+
+    dev_id = await get_or_create_device("apple", "iPhone 13", 128)
+    from techhunter.db import get_session
+    from techhunter.db.models import PriceObservation
+    from datetime import datetime, timezone
+    from techhunter.valuation.devices import _upsert_baseline
+    async with get_session() as s:
+        from sqlalchemy import delete
+        await s.execute(delete(PriceObservation).where(PriceObservation.device_id == dev_id))
+        for p in (41000, 42000, 43000):
+            s.add(PriceObservation(device_id=dev_id, condition="defect", price=p, listing_id=f"obs-{p}", observed_at=datetime.now(timezone.utc)))
+        await s.commit()
+    await _upsert_baseline(dev_id, "defect", 42000, 3)
+
+    it_as_is = _item("iPhone 13 128GB", "Небольшие потертости на корпусе, экран идеальный, всё работает", 30000)
+    rep_as_is = await evaluate_listing(it_as_is, run_clip=False, do_dedup=False)
+    val_as_is = await value_listing(it_as_is, rep_as_is, log_obs=False)
+    check("As-is condition baseline exists", val_as_is.condition_baselines.get("defect") == 42000)
+    check("As-is net matches defect median", val_as_is.net_profit == 42000 - 30000)
+    check("As-is opportunity working", val_as_is.opportunity is True and val_as_is.opportunity_type == "working")
+
+    await set_repair_cost("apple", "iPhone 13", "no_power", 8000)
+    it_nopower = _item("iPhone 13 128GB", "Не включается телефон, донор", 20000)
+    rep_nopower = await evaluate_listing(it_nopower, run_clip=False, do_dedup=False)
+    val_nopower = await value_listing(it_nopower, rep_nopower, log_obs=False)
+    check("no_power in defects", "no_power" in rep_nopower.defects)
+    check("no_power condition broken", rep_nopower.condition == "broken")
+    check("no_power flips to working", val_nopower.opportunity is True and val_nopower.opportunity_type == "broken_flip")
+    check("no_power net profit matches", val_nopower.net_profit == 55000 - 20000 - 8000)
 
 
 async def _main() -> None:
@@ -209,6 +315,11 @@ async def _main() -> None:
     await case_low_battery_defect()
     await case_spec_extraction()
     await case_repair_unknown()
+    await case_carrier_lock()
+    await case_regional_variants()
+    await case_battery_cycles_fraud()
+    await case_dynamic_battery_threshold()
+    await case_repairable_gems()
     print("\nAll calibration checks passed.")
 
 

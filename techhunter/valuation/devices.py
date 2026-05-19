@@ -6,7 +6,6 @@ accumulate and the more accurate the medians become. Per condition tier
 (ideal / good / defect / broken / for_parts) a separate median is learned.
 """
 import logging
-import time
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select
@@ -18,6 +17,16 @@ from ..db.models import DeviceCatalog, MarketBaseline, PriceObservation
 from .clustering import robust_median
 
 log = logging.getLogger(__name__)
+
+
+def _age_seconds(dt: datetime) -> float:
+    """Seconds since dt. SQLite returns naive datetimes that are actually
+    UTC; .timestamp() would treat them as local time and skew the age
+    (even negative under +TZ), so we pin tzinfo to UTC first."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return max(0.0, (datetime.now(timezone.utc) - dt).total_seconds())
+
 
 WORKING_GRADES = ("ideal", "good")
 WORKING_CONDITION = "working"  # synthetic tier = ideal+good resale value
@@ -204,7 +213,7 @@ async def get_baseline(device_id: int) -> int | None:
     row = await _row(device_id, WORKING_CONDITION)
     if row is None:
         return await relearn(device_id)
-    age = time.time() - row.updated_at.timestamp()
+    age = _age_seconds(row.updated_at)
     if age >= config.BASELINE_REFRESH_SEC:
         relearned = await relearn(device_id)
         return relearned if relearned is not None else row.median_price
@@ -218,8 +227,7 @@ async def get_working_meta(device_id: int) -> tuple[int | None, int, float]:
     row = await _row(device_id, WORKING_CONDITION)
     if row is None:
         return price, 0, 0.0
-    age = max(0.0, time.time() - row.updated_at.timestamp())
-    return price, int(row.sample_size or 0), age
+    return price, int(row.sample_size or 0), _age_seconds(row.updated_at)
 
 
 async def get_condition_baselines(device_id: int) -> dict[str, int]:

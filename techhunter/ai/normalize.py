@@ -113,15 +113,54 @@ def _pixel_model(text: str) -> str | None:
     return f"Pixel {m.group(1)}{tail}"
 
 
+_REF_RE = re.compile(
+    r"\b(?:реф|рефаб|refurb\w*|восстановл\w*|восстановк\w*|cpo)\b",
+    re.I,
+)
+_ROSTEST_RE = re.compile(
+    r"\b(?:ростест|rst|рст)\b|для\s*рф\b|росси[йяи]\w*\s*верс",
+    re.I,
+)
+_ESIM_RE = re.compile(
+    r"\besim\s*(?:only|онли)\b|\b(?:only|онли)\s*esim\b|без\s*(?:физ|сим\s*лот|лотка\s*сим|слота)|без\s*сим\s*карт\w*|\bамериканец\b|\bамерик\w*\s*(?:верс|модел)",
+    re.I,
+)
+_CN_RE = re.compile(
+    r"\b(?:cn/a|ch/a)\b|китай\w*\s*(?:верс|модел)|\bдве\s*физ\s*сим\b|\b2\s*физ\s*сим\b|\bдвухсимочн\w*\b",
+    re.I,
+)
+_CIS_RE = re.compile(
+    r"\b(?:снг|кз|kz|индия|индус|оаэ|uae|япония|японец)\b",
+    re.I,
+)
+
+
+def _detect_version(text: str) -> str | None:
+    if _REF_RE.search(text):
+        return "Ref"
+    if _ROSTEST_RE.search(text):
+        return "RST"
+    if _ESIM_RE.search(text):
+        return "eSIM"
+    if _CN_RE.search(text):
+        return "CN"
+    if _CIS_RE.search(text):
+        return "CIS"
+    return None
+
+
 def normalize_device(
     title: str,
     *,
+    description: str = "",
     storage_gb: int | None = None,
     ram_gb: int | None = None,
     params: dict[str, str] | None = None,
 ) -> CanonicalDevice:
     params = params or {}
-    text = normalize_homoglyphs(title or "").lower()
+    text = normalize_homoglyphs(
+        " ".join([title or "", description or ""])
+    ).lower()
     if params:
         text += " " + normalize_homoglyphs(
             " ".join(str(v) for v in params.values())
@@ -144,6 +183,10 @@ def normalize_device(
                 else "google" if model.startswith("Pixel")
                 else "samsung"
             )
+
+    version = _detect_version(text)
+    if model and version:
+        model = f"{model} [{version}]"
 
     return CanonicalDevice(
         brand=brand,
