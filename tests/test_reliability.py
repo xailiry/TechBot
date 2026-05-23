@@ -14,6 +14,7 @@ from techhunter.storage import (
     cache_listing_skipped,
     get_cached_listing,
     mark_alert_sent,
+    record_feedback,
 )
 from techhunter.valuation.engine import Valuation
 
@@ -71,6 +72,16 @@ async def test_cache_and_retry() -> None:
           c2["report"] is None and c2["valuation"] is None)
 
 
+async def test_content_hash_card_stable() -> None:
+    lid = f"rel-{uuid.uuid4().hex}"
+    card = _item(lid, 40000)
+    detailed = card.model_copy()
+    detailed.description = "Полное описание продавца"
+    detailed.price = 39000
+    check("content hash ignores details/price",
+          card.get_content_hash() == detailed.get_content_hash())
+
+
 async def test_per_user_dedup() -> None:
     lid = f"rel-{uuid.uuid4().hex}"
     a, b = 700001, 700002
@@ -82,6 +93,90 @@ async def test_per_user_dedup() -> None:
     # cache must NOT consume the lot for other users).
     check("B still independent", not await alert_already_sent(b, lid))
     await mark_alert_sent(a, lid)  # idempotent, no error
+
+
+async def test_delivery_failure_not_marked_sent() -> None:
+    from techhunter import monitor
+
+    lid = f"rel-{uuid.uuid4().hex}"
+    tg = 710000 + (uuid.uuid4().int % 1000)
+    item = _item(lid)
+    rep = _rep(lid)
+    val = _val(lid)
+
+    class Target:
+        tg_id = tg
+        query = "iphone"
+
+    class FailingNotifier:
+        async def deal(self, *args, **kwargs):
+            raise RuntimeError("telegram down")
+
+    async def fake_evaluate(*args, **kwargs):
+        return rep, val
+
+    orig = monitor._evaluate
+    monitor._evaluate = fake_evaluate  # type: ignore
+    try:
+        counters = {"errors": 0, "processed": 0, "cached": 0,
+                    "deals": 0, "filtered": 0}
+        await monitor._handle_items(
+            object(), [item], Target(), FailingNotifier(),
+            asyncio.Semaphore(1), {}, counters, {}, mode="fast",
+        )
+    finally:
+        monitor._evaluate = orig  # type: ignore
+
+    check("delivery failure counted", counters["errors"] == 1)
+    check("delivery failure not marked sent",
+          not await alert_already_sent(tg, lid))
+
+
+async def test_feedback_threshold_filters_noisy_user() -> None:
+    from techhunter import monitor
+
+    lid = f"rel-{uuid.uuid4().hex}"
+    tg = 711000 + (uuid.uuid4().int % 1000)
+    item = _item(lid)
+    rep = _rep(lid)
+    val = Valuation(
+        listing_id=lid, condition="good", baseline_price=60000,
+        net_profit=3500, profit_pct=0.20, opportunity=True,
+        opportunity_type="working", scam_score=70, scam_verdict="unknown",
+    )
+    for i in range(5):
+        await record_feedback(tg, f"old-miss-{i}-{uuid.uuid4().hex}", "down")
+
+    class Target:
+        tg_id = tg
+        query = "iphone"
+
+    class Notifier:
+        calls = 0
+
+        async def deal(self, *args, **kwargs):
+            self.calls += 1
+
+    async def fake_evaluate(*args, **kwargs):
+        return rep, val
+
+    orig = monitor._evaluate
+    monitor._evaluate = fake_evaluate  # type: ignore
+    notifier = Notifier()
+    try:
+        counters = {"errors": 0, "processed": 0, "cached": 0,
+                    "deals": 0, "filtered": 0}
+        drops = {}
+        await monitor._handle_items(
+            object(), [item], Target(), notifier,
+            asyncio.Semaphore(1), {}, counters, drops, mode="fast",
+        )
+    finally:
+        monitor._evaluate = orig  # type: ignore
+
+    check("feedback threshold filtered", notifier.calls == 0
+          and counters["filtered"] == 1)
+    check("feedback drop reason", drops.get("feedback_threshold") == 1)
 
 
 async def test_sqlite_pragmas() -> None:
@@ -171,7 +266,10 @@ async def test_cleanup_old_rows() -> None:
 
 def main() -> None:
     asyncio.run(test_cache_and_retry())
+    asyncio.run(test_content_hash_card_stable())
     asyncio.run(test_per_user_dedup())
+    asyncio.run(test_delivery_failure_not_marked_sent())
+    asyncio.run(test_feedback_threshold_filters_noisy_user())
     asyncio.run(test_sqlite_pragmas())
     asyncio.run(test_image_hash_dedup_and_reuse())
     asyncio.run(test_cleanup_old_rows())

@@ -3,6 +3,7 @@ guided add, per-user delivery filters. Commands remain as shortcuts."""
 import logging
 
 from aiogram import Bot, Dispatcher, F
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -30,8 +31,10 @@ from .format import esc, fmt_price, parse_command
 from .screens import (
     hub_kb,
     screen_add,
+    screen_discovery,
     screen_help,
     screen_hub,
+    screen_learned,
     screen_prices,
     screen_quality,
     screen_settings,
@@ -51,6 +54,11 @@ async def _edit(cb: CallbackQuery, built: tuple) -> None:
     text, kb = built
     try:
         await cb.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    except TelegramBadRequest as e:
+        if "message is not modified" in str(e).lower():
+            return
+        log.debug("edit failed (%s), resending", e)
+        await cb.message.answer(text, parse_mode="HTML", reply_markup=kb)
     except Exception as e:  # message unchanged / too old -> resend
         log.debug("edit failed (%s), resending", e)
         await cb.message.answer(text, parse_mode="HTML", reply_markup=kb)
@@ -63,7 +71,7 @@ async def _edit(cb: CallbackQuery, built: tuple) -> None:
 async def cmd_menu(msg: Message, state: FSMContext) -> None:
     await state.clear()
     await upsert_user(msg.from_user.id, msg.from_user.username)
-    text, kb = screen_hub()
+    text, kb = await screen_hub(msg.from_user.id)
     await msg.answer(text, parse_mode="HTML", reply_markup=kb)
 
 
@@ -159,6 +167,98 @@ async def cmd_del(msg: Message) -> None:
                      reply_markup=hub_kb())
 
 
+@dp.message(Command("discovery"))
+async def cmd_discovery(msg: Message) -> None:
+    await upsert_user(msg.from_user.id, msg.from_user.username)
+    text, kb = await screen_discovery(msg.from_user.id)
+    await msg.answer(text, parse_mode="HTML", reply_markup=kb)
+
+
+@dp.message(Command("discovery_profit"))
+async def cmd_discovery_profit(msg: Message) -> None:
+    args = (msg.text or "").split()
+    if len(args) < 2 or not args[1].isdigit():
+        await msg.answer("Пример: <code>/discovery_profit 10000</code>", parse_mode="HTML")
+        return
+    from ..storage import set_discovery_profit
+    await set_discovery_profit(msg.from_user.id, rub=int(args[1]))
+    await msg.answer(f"✅ Минимальный профит Discovery изменен на {args[1]}₽", reply_markup=hub_kb())
+
+
+@dp.message(Command("discovery_ratio"))
+async def cmd_discovery_ratio(msg: Message) -> None:
+    args = (msg.text or "").split()
+    if len(args) < 2 or not args[1].replace("%", "").isdigit():
+        await msg.answer("Пример: <code>/discovery_ratio 25</code>", parse_mode="HTML")
+        return
+    val = float(args[1].replace("%", "")) / 100
+    from ..storage import set_discovery_profit
+    await set_discovery_profit(msg.from_user.id, ratio=val)
+    await msg.answer(f"✅ Минимальная маржа Discovery изменена на {int(val*100)}%", reply_markup=hub_kb())
+
+
+# ─── Training Mode ──────────────────────────────────────────────────────────
+
+@dp.message(Command("train_start"))
+async def cmd_train_start(msg: Message) -> None:
+    from .. import runtime
+    
+    if runtime.is_training_mode():
+        await msg.answer("⚠️ Обучение уже запущено.")
+        return
+        
+    try:
+        runtime.set_training_mode(True)
+        await msg.answer("🚀 <b>Режим обучения запущен!</b>\nПодписки приостановлены. Бот сканирует рынок в фоновом процессе.", parse_mode="HTML")
+    except Exception as e:
+        await msg.answer(f"❌ Ошибка запуска: {e}")
+
+
+@dp.message(Command("train_stop"))
+async def cmd_train_stop(msg: Message) -> None:
+    from .. import runtime
+    
+    if not runtime.is_training_mode():
+        await msg.answer("Обучение не запущено.")
+        return
+        
+    runtime.set_training_mode(False)
+    await msg.answer("🛑 <b>Режим обучения остановлен.</b>\nОбычная работа монитора восстановлена.", parse_mode="HTML")
+
+
+@dp.message(Command("train_stat"))
+async def cmd_train_stat(msg: Message) -> None:
+    try:
+        from techhunter.db.session import async_session_factory
+        from sqlalchemy import text
+        
+        async with async_session_factory() as session:
+            # How many items were learned during training (source='training')
+            res = await session.execute(text("SELECT count(*) FROM price_observations WHERE source='training'"))
+            obs_count = res.scalar() or 0
+            
+            res = await session.execute(text("SELECT count(*) FROM device_catalog"))
+            dev_count = res.scalar() or 0
+            
+            res = await session.execute(text("SELECT count(*) FROM listings"))
+            cache_count = res.scalar() or 0
+            
+            status = "🏃 <b>Запущено</b>" if (from_runtime := __import__("techhunter.runtime", fromlist=["is_training_mode"])).is_training_mode() else "⏸ <b>Остановлено</b>"
+            
+            await msg.answer(
+                f"📊 <b>Статистика обучения:</b>\n"
+                f"Статус: {status}\n\n"
+                f"📱 Известно устройств: <b>{dev_count}</b>\n"
+                f"💰 Собрано новых цен: <b>{obs_count}</b>\n"
+                f"🗃 Просмотрено карточек (общее): <b>{cache_count}</b>",
+                parse_mode="HTML"
+            )
+    except Exception as e:
+        await msg.answer(f"Ошибка чтения БД: {e}")
+
+
+
+
 # ─── Navigation router ──────────────────────────────────────────────────────
 
 @dp.callback_query(F.data == "noop")
@@ -172,7 +272,7 @@ async def cb_nav(cb: CallbackQuery, state: FSMContext) -> None:
     dest = parts[1]
     if dest == "hub":
         await state.clear()
-        await _edit(cb, screen_hub())
+        await _edit(cb, await screen_hub(cb.from_user.id))
     elif dest == "help":
         await _edit(cb, screen_help())
     elif dest == "add":
@@ -184,6 +284,11 @@ async def cb_nav(cb: CallbackQuery, state: FSMContext) -> None:
         await _edit(cb, await screen_settings(cb.from_user.id))
     elif dest == "status":
         await _edit(cb, await screen_status())
+    elif dest == "learned":
+        page = int(parts[2]) if len(parts) > 2 else 0
+        await _edit(cb, await screen_learned(page))
+    elif dest == "discovery":
+        await _edit(cb, await screen_discovery(cb.from_user.id))
     elif dest == "quality":
         await _edit(cb, await screen_quality(cb.from_user.id))
     elif dest == "prices":
@@ -208,18 +313,62 @@ async def cb_settings(cb: CallbackQuery) -> None:
     if action == "pause":
         from ..storage import is_paused
         await set_paused(tg, not await is_paused(tg))
+        await _edit(cb, await screen_settings(tg))
     elif action == "shop":
         from ..storage import get_delivery_prefs
         cur = await get_delivery_prefs(tg)
         await set_exclude_shop(tg, not cur.exclude_shop)
+        await _edit(cb, await screen_settings(tg))
     elif action == "score":
         from ..storage import get_delivery_prefs
         cur = await get_delivery_prefs(tg)
         await set_min_score(tg, cur.min_score + int(parts[2]))
+        await _edit(cb, await screen_settings(tg))
     elif action == "cond":
         await toggle_exclude_condition(tg, parts[2])
-    await _edit(cb, await screen_settings(tg))
+        await _edit(cb, await screen_settings(tg))
     await cb.answer("Сохранено")
+
+
+@dp.callback_query(F.data.startswith("disc:"))
+async def cb_discovery(cb: CallbackQuery) -> None:
+    from ..db.models import User
+    from ..storage import (
+        get_session,
+        set_discovery_enabled,
+        set_discovery_profit,
+    )
+
+    await upsert_user(cb.from_user.id, cb.from_user.username)
+    parts = cb.data.split(":")
+    action = parts[1]
+    tg = cb.from_user.id
+
+    if action in ("on", "off"):
+        enable = action == "on"
+        await set_discovery_enabled(tg, enable)
+        await cb.answer("Discovery включён" if enable else "Discovery выключен")
+    elif action == "profit":
+        delta = int(parts[2])
+        async with get_session() as s:
+            u = await s.get(User, tg)
+            cur = u.discovery_min_profit_rub if u else config.DISCOVERY_MIN_PROFIT_RUB
+        new = max(0, cur + delta)
+        await set_discovery_profit(tg, rub=new)
+        await cb.answer(f"Мин. профит: {new}₽")
+    elif action == "ratio":
+        delta = int(parts[2])  # percentage points
+        async with get_session() as s:
+            u = await s.get(User, tg)
+            cur = u.discovery_min_profit_ratio if u else config.DISCOVERY_MIN_PROFIT_RATIO
+        new = min(0.9, max(0.0, round(cur + delta / 100, 2)))
+        await set_discovery_profit(tg, ratio=new)
+        await cb.answer(f"Мин. маржа: {int(new * 100)}%")
+    else:
+        await cb.answer()
+        return
+    await _edit(cb, await screen_discovery(cb.from_user.id))
+
 
 
 # ─── Guided add (FSM) ───────────────────────────────────────────────────────
@@ -304,9 +453,16 @@ async def cb_feedback(cb: CallbackQuery) -> None:
 
 @dp.message(F.text)
 async def fallback(msg: Message) -> None:
-    text, kb = screen_hub()
+    text, kb = await screen_hub(msg.from_user.id)
     await msg.answer(text, parse_mode="HTML", reply_markup=kb)
 
 
+
 def build_bot() -> tuple[Bot, Dispatcher]:
-    return Bot(token=config.require_bot_token()), dp
+    token = config.require_bot_token()
+    if config.TELEGRAM_PROXY:
+        from aiogram.client.session.aiohttp import AiohttpSession
+        log.info("Bot: using proxy %s for Telegram API", config.TELEGRAM_PROXY)
+        session = AiohttpSession(proxy=config.TELEGRAM_PROXY)
+        return Bot(token=token, session=session), dp
+    return Bot(token=token), dp

@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from sqlalchemy import (
     BigInteger,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -39,9 +40,23 @@ class User(Base):
     exclude_shop: Mapped[bool] = mapped_column(
         Integer, default=0, server_default="0"
     )
+    # Discovery Mode: broad scan of the whole category (e.g. all of Russia).
+    discovery_enabled: Mapped[bool] = mapped_column(
+        Integer, default=0, server_default="0"
+    )
+    discovery_min_profit_rub: Mapped[int] = mapped_column(
+        Integer, default=7000, server_default="7000"
+    )
+    discovery_min_profit_ratio: Mapped[float] = mapped_column(
+        Float, default=0.20, server_default="0.2"
+    )
+    discovery_city_slug: Mapped[str] = mapped_column(
+        String(64), default="rossiya", server_default="'rossiya'"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+
 
     subscriptions: Mapped[list["Subscription"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
@@ -100,6 +115,8 @@ class Listing(Base):
     source: Mapped[str] = mapped_column(String(16), default="avito")
     url: Mapped[str] = mapped_column(Text)
     title: Mapped[str | None] = mapped_column(Text)
+    content_hash: Mapped[str | None] = mapped_column(String(64), index=True)
+
     device_id: Mapped[int | None] = mapped_column(
         ForeignKey("device_catalog.id", ondelete="SET NULL")
     )
@@ -138,7 +155,7 @@ class PriceObservation(Base):
     storage_gb: Mapped[int | None] = mapped_column(Integer)
     condition: Mapped[str] = mapped_column(String(32), default="working")
     price: Mapped[int] = mapped_column(Integer)
-    source: Mapped[str] = mapped_column(String(16), default="avito")
+    source: Mapped[str] = mapped_column(String(16), default="avito", index=True)
     observed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), index=True
     )

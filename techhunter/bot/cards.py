@@ -74,7 +74,7 @@ async def send_deal_card(
             )
     except Exception as e:
         log.warning("send_deal_card failed for %s: %s", tg_id, e)
-        return
+        raise
 
     if msg is not None:
         try:

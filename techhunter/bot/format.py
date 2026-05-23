@@ -45,6 +45,7 @@ MISSING_RU = {
     "no_baseline": "база цен ещё копится",
     "repair_cost_unknown": "не задана цена ремонта",
     "condition_discount_unknown": "дефект без оценки скидки за состояние",
+    "condition_unknown": "состояние не определено",
     "for_parts": "лот на запчасти",
     "flip_blocked": "дефект мешает перепродаже (напр. Face ID)",
 }
@@ -70,7 +71,7 @@ def fmt_price(n: int | None) -> str:
 
 def format_deal_card(item, report, valuation, sub_query: str = "") -> str:
     """Redesigned card: a profit headline up top, then market, condition,
-    seller, trust, and footnotes. Scannable in ~2 seconds."""
+    seller, trust, and specs. Scannable in ~2 seconds."""
     c_emoji, c_label = CONDITION_RU.get(
         report.condition, CONDITION_RU["unknown"]
     )
@@ -79,7 +80,12 @@ def format_deal_card(item, report, valuation, sub_query: str = "") -> str:
         "suspicious": "🟠", "fake": "🔴",
     }.get(valuation.scam_verdict, "⚪️")
 
-    lines: list[str] = [f"{sv_emoji} <b>{esc(item.title)}</b>", ""]
+    # Title with regional badge if detected.
+    title = item.title
+    if report.is_rostest and "rst" not in title.lower() and "ростест" not in title.lower():
+        title += " [RST]"
+    
+    lines: list[str] = [f"{sv_emoji} <b>{esc(title)}</b>", ""]
 
     # 1. Headline: price + profit (the reason this lot was sent).
     lines.append(f"💰 <b>{fmt_price(item.price)}</b>   {c_emoji} {c_label}")
@@ -100,6 +106,7 @@ def format_deal_card(item, report, valuation, sub_query: str = "") -> str:
                 )
                 lines.append(
                     f"🔧 Ремонт: {fmt_price(valuation.repair_cost)}"
+                    + (" (оценочно)" if getattr(valuation, "repair_estimated", False) else "")
                     + (f" ({esc(rb)})" if rb else "")
                 )
         else:
@@ -107,9 +114,25 @@ def format_deal_card(item, report, valuation, sub_query: str = "") -> str:
                 f"🟢 <b>Профит: ~{fmt_price(valuation.net_profit)}</b>{pct}"
             )
 
-    # 2. Market.
+    # 2. Specs & Details.
+    spec_bits = []
+    if report.battery_health is not None:
+        bat = f"🔋 {report.battery_health}%"
+        if report.battery_cycles:
+            bat += f" ({report.battery_cycles} циклов)"
+        spec_bits.append(bat)
+    
+    if report.is_rostest:
+        spec_bits.append("🌍 Ростест")
+    elif report.is_sealed:
+        spec_bits.append("📦 Новый/Зап")
+    
+    if spec_bits:
+        lines.append("\n" + " · ".join(spec_bits))
+
+    # 3. Market context.
     if valuation.device_key:
-        lines.append(f"\n📱 {esc(valuation.device_key)}")
+        lines.append(f"📱 {esc(valuation.device_key)}")
     if valuation.baseline_price:
         bl = f"📊 Рынок: {fmt_price(valuation.baseline_price)}"
         if item.price and valuation.baseline_price:
@@ -122,40 +145,6 @@ def format_deal_card(item, report, valuation, sub_query: str = "") -> str:
         }.get(valuation.baseline_confidence)
         if conf:
             lines.append(f"{conf} (выборка {valuation.baseline_sample})")
-    cb = valuation.condition_baselines or {}
-    tiers = [
-        f"{lbl} ~{fmt_price(cb[k])}"
-        for k, lbl in (
-            ("ideal", "идеал"), ("good", "хор"), ("defect", "с деф"),
-            ("broken", "битый"), ("for_parts", "на з/ч"),
-        )
-        if k in cb
-    ]
-    if tiers:
-        lines.append("📈 По состояниям: " + " · ".join(tiers))
-
-    # 3. AI condition report.
-    rep_bits = []
-    if report.battery_health is not None:
-        rep_bits.append(f"АКБ {report.battery_health}%")
-    if report.is_sealed:
-        rep_bits.append("запечатан")
-    if report.is_rostest:
-        rep_bits.append("ростест")
-    lines.append(
-        "\n🧠 <b>Состояние</b>"
-        + (": " + " · ".join(rep_bits) if rep_bits else "")
-    )
-    if report.defects:
-        defs = [DEFECT_RU.get(d, d) for d in report.defects]
-        lines.append("⚠️ " + ", ".join(esc(d) for d in defs))
-    vis = [
-        VISUAL_RU[k]
-        for k, val in (report.visual or {}).items()
-        if val and k in VISUAL_RU
-    ]
-    if vis:
-        lines.append("👁 " + ", ".join(esc(v) for v in vis))
 
     # 4. Seller.
     if item.seller_name:
@@ -166,9 +155,23 @@ def format_deal_card(item, report, valuation, sub_query: str = "") -> str:
             sb.append(f"{item.seller_listings} объявл")
         if item.seller_reviews is not None:
             sb.append(f"{item.seller_reviews} отз")
-        lines.append("👤 " + " · ".join(sb))
+        lines.append("\n👤 " + " · ".join(sb))
 
-    # 5. Trust.
+    # 5. Condition & Defects.
+    if report.defects or report.visual:
+        lines.append("\n🧠 <b>Состояние</b>")
+        if report.defects:
+            defs = [DEFECT_RU.get(d, d) for d in report.defects]
+            lines.append("⚠️ " + ", ".join(esc(d) for d in defs))
+        vis = [
+            VISUAL_RU[k]
+            for k, val in (report.visual or {}).items()
+            if val and k in VISUAL_RU
+        ]
+        if vis:
+            lines.append("👁 " + ", ".join(esc(v) for v in vis))
+
+    # 6. Trust & Verdict.
     lines.append(
         f"\n🛡 Надёжность {valuation.scam_score}/100 · "
         f"{valuation.scam_verdict}"
@@ -178,13 +181,23 @@ def format_deal_card(item, report, valuation, sub_query: str = "") -> str:
     for c in valuation.cons[:2]:
         lines.append(f"⛔ {esc(c)}")
 
-    # 6. Footnotes.
+    # 7. Footnotes.
     if valuation.missing:
         miss = [MISSING_RU.get(m, m) for m in valuation.missing]
         lines.append("\nℹ️ " + "; ".join(esc(m) for m in miss))
+    
+    footer = []
+    if item.date_text:
+        footer.append(f"⌛ {esc(item.date_text)}")
     if sub_query:
-        lines.append(f"🔎 <i>{esc(sub_query)}</i>")
+        footer.append(f"🔎 <i>{esc(sub_query)}</i>")
+    
+    if footer:
+        lines.append("\n" + " · ".join(footer))
+
+        
     return "\n".join(lines)
+
 
 
 _TIER_LABELS = (

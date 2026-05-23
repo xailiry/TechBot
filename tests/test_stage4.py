@@ -90,7 +90,11 @@ def test_card_text() -> None:
     check("has price", "30 000 ₽" in txt)
     check("broken post-repair", "после ремонта" in txt)
     check("repair line", "Ремонт" in txt and "9 000" in txt)
-    check("AI battery", "АКБ 88%" in txt)
+    est_txt = format_deal_card(
+        _item(), _report(), _val(repair_estimated=True), "iphone 13 pro"
+    )
+    check("estimated repair labelled", "оценочно" in est_txt)
+    check("AI battery", "🔋 88%" in txt)
     check("defect RU", "разбит экран" in txt)
     check("visual RU", "стоковое" in txt)
     check("scam line", "70/100" in txt)
@@ -209,11 +213,38 @@ async def test_empty_list_no_markup() -> None:
           and any(kb.inline_keyboard))
 
 
+async def test_edit_not_modified_no_resend() -> None:
+    from aiogram.exceptions import TelegramBadRequest
+    from techhunter.bot.app import _edit
+
+    class Msg:
+        answers = 0
+
+        async def edit_text(self, *args, **kwargs):
+            raise TelegramBadRequest(
+                method=object(),
+                message="Bad Request: message is not modified",
+            )
+
+        async def answer(self, *args, **kwargs):
+            self.answers += 1
+
+    class Cb:
+        message = Msg()
+
+    await _edit(Cb(), ("same", None))
+    check("not modified no resend", Cb.message.answers == 0)
+
+
 def test_imports() -> None:
+    import inspect
+
     import main  # noqa: F401  (top-level entrypoint script)
 
     import techhunter.bot.app  # noqa: F401
     import techhunter.bot.notifier  # noqa: F401
+    check("main does not create_all",
+          "create_all" not in inspect.getsource(main._main))
     check("bot/main import", True)
 
 
@@ -241,10 +272,10 @@ def test_onboarding_text() -> None:
           isinstance(ConsoleNotifier(), Notifier))
 
 
-def test_hub_screen() -> None:
+async def test_hub_screen() -> None:
     from techhunter.bot.screens import screen_help, screen_hub
 
-    text, kb = screen_hub()
+    text, kb = await screen_hub()
     check("hub text", "TechHunter" in text)
     cbs = [b.callback_data for row in kb.inline_keyboard for b in row]
     for need in ("nav:subs:0", "nav:add", "nav:settings",
@@ -327,13 +358,14 @@ def main() -> None:
     test_card_text()
     test_haggle_and_kb()
     test_onboarding_text()
-    test_hub_screen()
+    asyncio.run(test_hub_screen())
     asyncio.run(test_settings_screen())
     asyncio.run(test_status_screen())
     asyncio.run(test_quality_and_prices_screens())
     asyncio.run(test_card_state_roundtrip())
     asyncio.run(test_subs_and_dedup())
     asyncio.run(test_empty_list_no_markup())
+    asyncio.run(test_edit_not_modified_no_resend())
     test_imports()
     print("\nAll Stage 4 checks passed.")
 

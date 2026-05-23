@@ -16,7 +16,12 @@ from ..storage import (
     get_subscription,
     list_subscriptions,
 )
-from ..valuation.devices import learning_overview, prices_for_model
+from ..valuation.devices import (
+    count_working_baselines,
+    learned_devices,
+    learning_overview,
+    prices_for_model,
+)
 from .format import CONDITION_RU, esc, fmt_price
 
 SUBS_PER_PAGE = 6
@@ -27,11 +32,15 @@ def _kb(rows: list[list[InlineKeyboardButton]]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def hub_kb() -> InlineKeyboardMarkup:
+def hub_kb(discovery_on: bool = False) -> InlineKeyboardMarkup:
+    d_text = "🔎 Discovery: ВЫКЛ" if not discovery_on else "🔎 Discovery: ВКЛ ✅"
     return _kb([
         [
             InlineKeyboardButton(text="📋 Подписки", callback_data="nav:subs:0"),
             InlineKeyboardButton(text="➕ Добавить", callback_data="nav:add"),
+        ],
+        [
+            InlineKeyboardButton(text=d_text, callback_data="nav:discovery"),
         ],
         [
             InlineKeyboardButton(text="⚙️ Настройки",
@@ -47,7 +56,16 @@ def hub_kb() -> InlineKeyboardMarkup:
     ])
 
 
-def screen_hub() -> tuple[str, InlineKeyboardMarkup]:
+async def screen_hub(tg_id: int | None = None) -> tuple[str, InlineKeyboardMarkup]:
+    from ..db import get_session
+    from ..db.models import User
+    discovery_on = False
+    if tg_id:
+        async with get_session() as s:
+            u = await s.get(User, tg_id)
+            if u:
+                discovery_on = bool(u.discovery_enabled)
+
     text = (
         "🎯 <b>TechHunter</b>\n"
         "Монитор Avito для перекупа техники.\n\n"
@@ -55,7 +73,67 @@ def screen_hub() -> tuple[str, InlineKeyboardMarkup]:
         "и присылаю только выгодные лоты (включая битые под ремонт).\n\n"
         "Выбери раздел:"
     )
-    return text, hub_kb()
+    return text, hub_kb(discovery_on)
+
+
+async def screen_discovery(tg_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    """Discovery status + explicit on/off. State shown always matches reality
+    (no blind toggle), so the label can never contradict the actual state."""
+    from ..db import get_session
+    from ..db.models import User
+    from ..valuation.devices import count_working_baselines
+
+    on = False
+    min_rub = config.DISCOVERY_MIN_PROFIT_RUB
+    min_ratio = config.DISCOVERY_MIN_PROFIT_RATIO
+    async with get_session() as s:
+        u = await s.get(User, tg_id)
+        if u:
+            on = bool(u.discovery_enabled)
+            min_rub = u.discovery_min_profit_rub
+            min_ratio = u.discovery_min_profit_ratio
+    learned = await count_working_baselines()
+
+    lines = [
+        f"🔎 <b>Глобальный поиск (Discovery): "
+        f"{'ВКЛ ✅' if on else 'ВЫКЛ ❌'}</b>",
+        "",
+        "Сканирую всю категорию телефонов по РФ и присылаю лучшие лоты "
+        "под твои пороги.",
+        "",
+        f"Мин. профит: <b>{fmt_price(min_rub)}</b>",
+        f"Мин. маржа: <b>{int(min_ratio * 100)}%</b>",
+        f"Выучено моделей: <b>{learned}</b>",
+        "",
+        "Меняй пороги кнопками ниже. Ниже порог — больше сделок (в т.ч. "
+        "андроиды и бюджет), но больше шума.",
+    ]
+    if on:
+        lines += [
+            "",
+            "⏸ Пока Discovery включён, обычные подписки приостановлены.",
+            "Идёт прогрев: бот изучает рынок (заходит в объявления и копит "
+            "цены), затем начинает присылать сделки. На это нужно время.",
+        ]
+    rows = [
+        [InlineKeyboardButton(
+            text="❌ Выключить Discovery" if on else "✅ Включить Discovery",
+            callback_data="disc:off" if on else "disc:on",
+        )],
+        [
+            InlineKeyboardButton(text="− 1000", callback_data="disc:profit:-1000"),
+            InlineKeyboardButton(text=f"💰 {fmt_price(min_rub)}", callback_data="noop"),
+            InlineKeyboardButton(text="+ 1000", callback_data="disc:profit:1000"),
+        ],
+        [
+            InlineKeyboardButton(text="− 5%", callback_data="disc:ratio:-5"),
+            InlineKeyboardButton(text=f"📈 {int(min_ratio * 100)}%", callback_data="noop"),
+            InlineKeyboardButton(text="+ 5%", callback_data="disc:ratio:5"),
+        ],
+        [_BACK],
+    ]
+    return "\n".join(lines), _kb(rows)
+
 
 
 def screen_help() -> tuple[str, InlineKeyboardMarkup]:
@@ -247,10 +325,63 @@ async def screen_status() -> tuple[str, InlineKeyboardMarkup]:
     if not ov["top"]:
         lines.append("  база ещё копится, дай боту поработать")
     rows = [
+        [InlineKeyboardButton(text="📚 База цен (все модели)",
+                              callback_data="nav:learned:0")],
         [InlineKeyboardButton(text="🔄 Обновить",
                               callback_data="nav:status")],
         [_BACK],
     ]
+    return "\n".join(lines), _kb(rows)
+
+
+LEARNED_PER_PAGE = 12
+
+
+async def screen_learned(page: int = 0) -> tuple[str, InlineKeyboardMarkup]:
+    """All devices whose market price the bot has learned, most-confident
+    first, paginated. Lets the operator see exactly what the bot can value."""
+    total = await count_working_baselines()
+    if total == 0:
+        return (
+            "📚 <b>База цен пуста</b>\n\n"
+            "Бот ещё не накопил достаточно наблюдений. Цены учатся из "
+            "реальных объявлений — дай ему поработать.",
+            _kb([[_BACK]]),
+        )
+    pages = (total + LEARNED_PER_PAGE - 1) // LEARNED_PER_PAGE
+    page = max(0, min(page, pages - 1))
+    devs = await learned_devices(
+        limit=LEARNED_PER_PAGE, offset=page * LEARNED_PER_PAGE
+    )
+
+    lines = [f"📚 <b>Что бот знает по ценам</b> ({total} моделей)", ""]
+    for d in devs:
+        lines.append(
+            f"• {esc(d['label'])}: <b>{fmt_price(d['price'])}</b>"
+            f" (выборка {d['sample']})"
+        )
+    lines.append("")
+    lines.append("<i>Цена — рыночная (рабочее состояние). "
+                 "Сортировка: сначала самые изученные.</i>")
+
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(
+            text="⬅️", callback_data=f"nav:learned:{page-1}"))
+    if pages > 1:
+        nav.append(InlineKeyboardButton(
+            text=f"{page+1}/{pages}", callback_data="noop"))
+    if page < pages - 1:
+        nav.append(InlineKeyboardButton(
+            text="➡️", callback_data=f"nav:learned:{page+1}"))
+    rows: list[list[InlineKeyboardButton]] = []
+    if nav:
+        rows.append(nav)
+    rows.append([
+        InlineKeyboardButton(text="🔄 Обновить",
+                             callback_data=f"nav:learned:{page}"),
+        _BACK,
+    ])
     return "\n".join(lines), _kb(rows)
 
 

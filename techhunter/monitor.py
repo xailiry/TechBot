@@ -1,7 +1,7 @@
-"""Polling monitor. Iterates active subscriptions, scrapes newest-first Avito
-pages, deduplicates, runs the evaluate+value pipeline, and notifies.
+"""Polling monitor. Iterates active subscriptions and performs discovery scans.
 
-The Telegram card UX (Stage 4) plugs in behind the same Notifier.
+Separated into Fast (newest listings) and Deep (background category scan) loops.
+Uses AI for evaluation and Telegram for notification.
 """
 import asyncio
 import contextlib
@@ -24,10 +24,13 @@ from .storage import (
     cache_listing,
     cache_listing_skipped,
     cleanup_old_rows,
+    discovery_users,
     get_cached_listing,
     get_delivery_prefs,
+    feedback_threshold_multiplier,
     mark_alert_sent,
     mark_subscription_onboarded,
+    check_content_duplicate,
 )
 from .valuation.engine import Valuation
 from .valuation.devices import (
@@ -40,17 +43,15 @@ from .valuation.scam import looks_shoplike
 
 log = logging.getLogger("techhunter.monitor")
 
-# Subscriptions whose onboarding task is running right now (avoid duplicate
-# concurrent crawls). Completion is persisted in DB (Subscription.onboarded_at).
+# Subscriptions whose onboarding task is running right now
 _onboard_inprogress: set[int] = set()
 _onboard_tasks: set[asyncio.Task] = set()
-# Once per process: re-learn already-onboarded subs so estimator/code
-# changes take effect right after a restart (no waiting for the timer).
+# Once per process: re-learn already-onboarded subs on startup
 _refreshed_run: set[int] = set()
 
 
 def _age_sec(dt) -> float:
-    """Seconds since dt. SQLite returns naive datetimes (UTC) -> assume UTC."""
+    """Seconds since dt (UTC)."""
     if dt is None:
         return float("inf")
     if dt.tzinfo is None:
@@ -59,14 +60,14 @@ def _age_sec(dt) -> float:
 
 
 async def _onboard(browser, sub, notifier: Notifier, announce: bool) -> None:
-    """Deep crawl: collect many real listings with condition/price to build
-    per-condition baselines. First time per subscription it announces; the
-    periodic silent refresh keeps medians fresh from a broad sample."""
+    """Deep crawl to build price baselines."""
+    if browser.paused.is_set():
+        log.warning("Onboarding skipped/deferred because captcha is active.")
+        return
     if announce:
         with contextlib.suppress(Exception):
-            await notifier.onboarding_started(
-                sub.tg_id, sub.query, config.ONBOARDING_MAX_SEC
-            )
+            await notifier.onboarding_started(sub.tg_id, sub.query, config.ONBOARDING_MAX_SEC)
+    
     deadline = time.time() + config.ONBOARDING_MAX_SEC
     try:
         items = await browser.search(
@@ -75,300 +76,405 @@ async def _onboard(browser, sub, notifier: Notifier, announce: bool) -> None:
             pages=config.ONBOARDING_PAGES,
         )
     except Exception as e:
-        # Do NOT persist onboarded: a failed crawl should be retried.
-        log.warning("onboarding search failed sub %s: %s", sub.id, e)
-        if announce:
-            with contextlib.suppress(Exception):
-                await notifier.onboarding_finished(sub.tg_id, sub.query, [])
+        log.warning("Onboarding search failed sub %s: %s", sub.id, e)
         return
 
-    cand = []
-    for it in items:
-        if normalize_device(it.title).model is not None:
-            cand.append(it)
-        if len(cand) >= config.ONBOARDING_MAX_DETAILS:
-            break
-
+    cand = [it for it in items if normalize_device(it.title).model is not None][:config.ONBOARDING_MAX_DETAILS]
     sem = asyncio.Semaphore(config.MONITOR_CONCURRENCY)
     device_ids: set[int] = set()
 
     async def _collect(it):
-        if time.time() > deadline:
-            return
+        if time.time() > deadline: return
         async with sem:
             try:
                 it = await browser.fetch_details(it)
                 rep = await evaluate_listing(it, run_clip=False, do_dedup=False)
-            except Exception:
+            except Exception: return
+            did = await get_or_create_device(rep.brand, rep.model or "", rep.storage_gb, rep.ram_gb)
+            if did is None or rep.is_sealed or looks_shoplike(it.title, it.description, it.seller_type, it.seller_listings):
                 return
-            did = await get_or_create_device(
-                rep.brand, rep.model or "", rep.storage_gb, rep.ram_gb
-            )
-            if did is None or rep.is_sealed or looks_shoplike(
-                it.title, it.description, it.seller_type, it.seller_listings
-            ):
-                return
-            if await log_observation(
-                did, rep.condition, it.price,
-                listing_id=it.id, raw_title=it.title,
-                storage_gb=rep.storage_gb,
-            ):
+            if await log_observation(did, rep.condition, it.price, listing_id=it.id, raw_title=it.title, storage_gb=rep.storage_gb):
                 device_ids.add(did)
 
     await asyncio.gather(*(_collect(it) for it in cand))
-    summary = []
     for did in device_ids:
         with contextlib.suppress(Exception):
             await relearn(did)
-            label, tiers = await device_summary(did)
-            if tiers:
-                summary.append((label, tiers))
-    # Persist completion so a restart does not re-run onboarding; the
-    # timestamp also schedules the next silent refresh.
-    with contextlib.suppress(Exception):
-        await mark_subscription_onboarded(sub.id)
-    log.info("onboarding %s sub %s %r: %d devices learned",
-             "done" if announce else "refreshed",
-             sub.id, sub.query, len(device_ids))
+    
+    await mark_subscription_onboarded(sub.id)
+    log.info("Onboarding finished for sub %s %r", sub.id, sub.query)
     if announce:
+        summary = []
+        for did in device_ids:
+            with contextlib.suppress(Exception):
+                label, tiers = await device_summary(did)
+                if tiers: summary.append((label, tiers))
         summary.sort(key=lambda x: x[0])
         with contextlib.suppress(Exception):
             await notifier.onboarding_finished(sub.tg_id, sub.query, summary)
 
 
-async def poll_once(browser, notifier: Notifier) -> None:
-    subs = await active_subscriptions()
-    runtime.set_captcha(browser.paused.is_set())
-    if not subs:
-        log.debug("No active subscriptions.")
-        runtime.update_cycle(
-            subs=0, scraped=0, processed=0, cached=0, errors=0,
-            deals=0, filtered=0, drop_reasons={},
-        )
-        return
-    tot_scraped = tot_processed = tot_cached = tot_errors = 0
-    tot_deals = tot_filtered = 0
-    # Eval cache for THIS poll: a listing shared by several subscriptions
-    # is evaluated once. drop_reasons aggregates why deals were withheld.
-    cycle_eval: dict[str, tuple] = {}
-    runtime_drop: dict[str, int] = {}
-    for sub in subs:
-        if sub.id not in _onboard_inprogress:
-            first = sub.onboarded_at is None
-            startup = not first and sub.id not in _refreshed_run
-            refresh = startup or (
-                not first
-                and config.ONBOARDING_REFRESH_SEC > 0
-                and _age_sec(sub.onboarded_at) >= config.ONBOARDING_REFRESH_SEC
-            )
-            if not first:
-                _refreshed_run.add(sub.id)
-            if first or refresh:
-                _onboard_inprogress.add(sub.id)
-                t = asyncio.create_task(
-                    _onboard(browser, sub, notifier, announce=first)
-                )
-                _onboard_tasks.add(t)
-                t.add_done_callback(_onboard_tasks.discard)
-                t.add_done_callback(
-                    lambda _t, sid=sub.id: _onboard_inprogress.discard(sid)
-                )
-                log.info(
-                    "onboarding %s for sub %s %r",
-                    "started" if first else "refresh", sub.id, sub.query,
-                )
-        pages = sub.search_pages or config.DEFAULT_SEARCH_PAGES
+async def _evaluate(browser, item, sem, cycle_eval, counters, mode: str = "fast", is_discovery: bool = False, deep_budget: dict | None = None):
+    """Pipeline: check cache -> fast valuation -> full enrichment."""
+    if item.id in cycle_eval:
+        return cycle_eval[item.id]
+
+    # Dedup re-posts
+    orig_id = await check_content_duplicate(item)
+    if orig_id:
+        crow = await get_cached_listing(orig_id)
+        if crow and _age_sec(crow["processed_at"]) <= config.LISTING_CACHE_TTL_SEC:
+            rep = (EvaluationReport(**crow["report"]) if crow["report"] else None)
+            val = (Valuation(**crow["valuation"]) if crow["valuation"] else None)
+            counters["cached"] += 1
+            cycle_eval[item.id] = (rep, val)
+            return rep, val
+
+    crow = await get_cached_listing(item.id)
+    if crow and crow["price"] == (item.price or None) and _age_sec(crow["processed_at"]) <= config.LISTING_CACHE_TTL_SEC:
+        rep = (EvaluationReport(**crow["report"]) if crow["report"] else None)
+        val = (Valuation(**crow["valuation"]) if crow["valuation"] else None)
+        counters["cached"] += 1
+        cycle_eval[item.id] = (rep, val)
+        return rep, val
+
+    async with sem:
         try:
-            items = await browser.search(
-                sub.query,
-                sub.city_slug,
-                min_price=sub.min_price,
-                max_price=sub.max_price,
-                pages=pages,
-            )
-        except Exception as e:
-            log.exception("search failed for sub %s (%r): %s",
-                          sub.id, sub.query, e)
-            continue
-
-        prefs = await get_delivery_prefs(sub.tg_id)
-        sem = asyncio.Semaphore(config.MONITOR_CONCURRENCY)
-        deals = filtered = processed = cached = errors = 0
-
-        async def _evaluate(item):
-            """Get (report, valuation) for a listing: reuse a fresh cache,
-            otherwise run the pipeline. On transient failure: NOT cached
-            -> retried next cycle (a lot is never lost)."""
-            nonlocal processed, cached, errors
-            if item.id in cycle_eval:
-                return cycle_eval[item.id]
-            crow = await get_cached_listing(item.id)
-            if (
-                crow is not None
-                and crow["price"] == (item.price or None)
-                and _age_sec(crow["processed_at"])
-                <= config.LISTING_CACHE_TTL_SEC
-            ):
-                rep = (EvaluationReport(**crow["report"])
-                       if crow["report"] else None)
-                val = (Valuation(**crow["valuation"])
-                       if crow["valuation"] else None)
-                cached += 1
-                cycle_eval[item.id] = (rep, val)
-                return rep, val
-            async with sem:
-                try:
-                    report, valuation = await process_new_listing(
-                        browser, item
-                    )
-                except Exception as e:
-                    errors += 1
-                    log.warning("pipeline failed for %s (retry next): %s",
-                                item.id, e)
+            from .valuation.engine import fast_value_listing, learn_from_card
+            verdict = await fast_value_listing(item, is_discovery=is_discovery)
+            if verdict == "skip":
+                await cache_listing_skipped(item)
+                cycle_eval[item.id] = (None, None)
+                return None, None
+            if verdict == "learn" and is_discovery:
+                # Card-only learning: log the price from the search card
+                # without opening the listing. Calm (no navigation) and fast
+                # (every card contributes), so baselines grow quickly.
+                await learn_from_card(item)
+                await cache_listing_skipped(item)
+                cycle_eval[item.id] = (None, None)
+                counters["learning"] = counters.get("learning", 0) + 1
+                return None, None
+            # "deal" (or a subscription "learn"): bounded deep evaluation.
+            if is_discovery and deep_budget is not None:
+                if deep_budget.get("n", 0) <= 0:
                     cycle_eval[item.id] = (None, None)
                     return None, None
-            processed += 1
-            if valuation is None:
-                await cache_listing_skipped(item)
-            else:
-                await cache_listing(item, report, valuation)
-            cycle_eval[item.id] = (report, valuation)
-            return report, valuation
+                deep_budget["n"] -= 1
+            report, valuation = await process_new_listing(browser, item, mode=mode)
+        except Exception as e:
+            counters["errors"] += 1
+            log.warning("Pipeline failed for %s: %s", item.id, e)
+            return None, None
 
-        async def _handle(item):
-            nonlocal deals, filtered
-            report, valuation = await _evaluate(item)
-            if valuation is None or not valuation.opportunity:
+    counters["processed"] += 1
+    if valuation is None:
+        await cache_listing_skipped(item)
+    else:
+        await cache_listing(item, report, valuation)
+    cycle_eval[item.id] = (report, valuation)
+    return report, valuation
+
+
+async def _handle_items(browser, items, target, notifier, sem, cycle_eval, counters, runtime_drop, mode: str = "fast", deep_budget: dict | None = None):
+    """Process a batch of items for a specific sub or discovery user."""
+    is_sub = hasattr(target, "query")
+    is_discovery = not is_sub
+    tg_id = target.tg_id
+    sub_query = target.query if is_sub else "🔎 Discovery"
+    prefs = await get_delivery_prefs(tg_id)
+    feedback_mult = await feedback_threshold_multiplier(tg_id)
+
+    async def _handle_one(it):
+        report, valuation = await _evaluate(browser, it, sem, cycle_eval, counters, mode=mode, is_discovery=is_discovery, deep_budget=deep_budget)
+        if valuation is None or not valuation.opportunity:
+            return
+        
+        if not is_sub:
+            min_rub = target.discovery_min_profit_rub or config.DISCOVERY_MIN_PROFIT_RUB
+            min_ratio = target.discovery_min_profit_ratio or config.DISCOVERY_MIN_PROFIT_RATIO
+            if valuation.net_profit < min_rub or (valuation.net_profit / it.price) < min_ratio:
                 return
-            # Per-user delivery dedup: another sub/user processing this
-            # listing must NOT consume it for this user.
-            if await alert_already_sent(sub.tg_id, item.id):
-                return
-            ok, reason = passes_filters(prefs, item, report, valuation)
-            if not ok:
-                filtered += 1
-                runtime_drop[reason] = runtime_drop.get(reason, 0) + 1
-                return
-            deals += 1
-            with contextlib.suppress(Exception):
-                await notifier.deal(
-                    item, report, valuation,
-                    tg_id=sub.tg_id, sub_query=sub.query,
+
+        if feedback_mult != 1.0:
+            min_rub = int(config.MIN_PROFIT_RUB * feedback_mult)
+            min_ratio = config.MIN_PROFIT_RATIO * feedback_mult
+            price = it.price or 1
+            if (
+                valuation.net_profit is None
+                or valuation.net_profit < min_rub
+                or (valuation.net_profit / price) < min_ratio
+            ):
+                counters["filtered"] += 1
+                runtime_drop["feedback_threshold"] = (
+                    runtime_drop.get("feedback_threshold", 0) + 1
                 )
-            # Mark delivered regardless of notifier type so the per-user
-            # dedup holds across cycles (idempotent insert).
-            with contextlib.suppress(Exception):
-                await mark_alert_sent(
-                    sub.tg_id, item.id,
-                    price=item.price, profit=valuation.net_profit,
-                    verdict=valuation.scam_verdict,
-                    condition=valuation.condition, sub_query=sub.query,
-                )
+                return
 
-        await asyncio.gather(*(_handle(it) for it in items))
-        log.info(
-            "sub %s %r: %d scraped, %d processed, %d cached, %d errors, "
-            "%d deals, %d filtered",
-            sub.id, sub.query, len(items), processed, cached, errors,
-            deals, filtered,
-        )
-        tot_scraped += len(items)
-        tot_processed += processed
-        tot_cached += cached
-        tot_errors += errors
-        tot_deals += deals
-        tot_filtered += filtered
-        await asyncio.sleep(config.SUBSCRIPTION_STAGGER_SEC)
+        if await alert_already_sent(tg_id, it.id):
+            return
 
-    runtime.set_captcha(browser.paused.is_set())
+        ok, reason = passes_filters(prefs, it, report, valuation)
+        if not ok:
+            counters["filtered"] += 1
+            runtime_drop[reason] = runtime_drop.get(reason, 0) + 1
+            return
+
+        try:
+            await notifier.deal(
+                it, report, valuation, tg_id=tg_id, sub_query=sub_query
+            )
+        except Exception as e:
+            counters["errors"] += 1
+            log.warning("Deal delivery failed for %s to %s: %s", it.id, tg_id, e)
+            return
+
+        counters["deals"] += 1
+        with contextlib.suppress(Exception):
+            await mark_alert_sent(
+                tg_id, it.id, price=it.price, profit=valuation.net_profit,
+                verdict=valuation.scam_verdict, condition=valuation.condition,
+                sub_query=sub_query,
+            )
+
+    await asyncio.gather(*(_handle_one(it) for it in items))
+
+
+async def poll_fast(browser, notifier: Notifier) -> None:
+    """Fast loop: check Page 1 of all subs + Discovery."""
+    is_paused = browser.paused.is_set()
+    runtime.set_captcha(is_paused)
+    if is_paused:
+        log.debug("Fast poll skipped because browser is paused (solving captcha).")
+        return
+    if runtime.is_training_mode():
+        log.info("Fast poll skipped because Training Mode is active.")
+        return
+    
+    subs = await active_subscriptions()
+    d_users = await discovery_users()
+    if not subs and not d_users: return
+
+    counters = {"scraped": 0, "processed": 0, "cached": 0, "errors": 0, "deals": 0, "filtered": 0}
+    cycle_eval = {}
+    runtime_drop = {}
+    eval_sem = asyncio.Semaphore(config.FAST_WORKERS)
+
+    # Subscriptions (suspended if Discovery Mode is active)
+    if d_users:
+        log.info("Discovery Mode active: suspending active subscriptions scans and onboarding.")
+        if _onboard_tasks:
+            log.info("Discovery Mode active: cancelling %d in-progress onboarding tasks.", len(_onboard_tasks))
+            for t in list(_onboard_tasks):
+                with contextlib.suppress(Exception):
+                    t.cancel()
+            _onboard_tasks.clear()
+            _onboard_inprogress.clear()
+    else:
+        for sub in subs:
+            if sub.id not in _onboard_inprogress:
+                if sub.onboarded_at is None or (config.ONBOARDING_REFRESH_SEC > 0 and _age_sec(sub.onboarded_at) >= config.ONBOARDING_REFRESH_SEC):
+                    _onboard_inprogress.add(sub.id)
+                    t = asyncio.create_task(_onboard(browser, sub, notifier, announce=(sub.onboarded_at is None)))
+                    _onboard_tasks.add(t)
+                    t.add_done_callback(_onboard_tasks.discard)
+                    t.add_done_callback(lambda _t, sid=sub.id: _onboard_inprogress.discard(sid))
+            
+            try:
+                items = await browser.search(sub.query, sub.city_slug, min_price=sub.min_price, max_price=sub.max_price, pages=1, mode="fast")
+                counters["scraped"] += len(items)
+                await _handle_items(browser, items, sub, notifier, eval_sem, cycle_eval, counters, runtime_drop, mode="fast")
+            except Exception as e:
+                log.warning("Fast search failed sub %s: %s", sub.id, e)
+
+    # Discovery
+    if d_users:
+        deep_budget = {"n": config.DISCOVERY_DEEP_PER_CYCLE}
+        try:
+            items = await browser.search(query="", city_slug=config.DISCOVERY_CITY_SLUG, min_price=config.DISCOVERY_MIN_PRICE, pages=1, mode="fast")
+            counters["scraped"] += len(items)
+            for u in d_users:
+                await _handle_items(browser, items, u, notifier, eval_sem, cycle_eval, counters, runtime_drop, mode="fast", deep_budget=deep_budget)
+        except Exception as e:
+            log.warning("Fast discovery failed: %s", e)
+
     runtime.update_cycle(
-        subs=len(subs), scraped=tot_scraped, processed=tot_processed,
-        cached=tot_cached, errors=tot_errors, deals=tot_deals,
-        filtered=tot_filtered, drop_reasons=dict(runtime_drop),
+        subs=len(subs), scraped=counters["scraped"], processed=counters["processed"],
+        cached=counters["cached"], errors=counters["errors"], deals=counters["deals"],
+        filtered=counters["filtered"], drop_reasons=runtime_drop,
     )
 
 
-def watchdog_decide(snap: dict, state: dict, now: float) -> list[str]:
-    """Pure: given a runtime snapshot + persistent state, return health
-    alerts to send (throttled). Mutates state (dry timer, last-alert times)."""
-    alerts: list[str] = []
-    last = state.setdefault("last_alert", {})
+async def poll_deep(browser, notifier: Notifier) -> None:
+    """Deep loop: background category scan (pages 2+)."""
+    if browser.paused.is_set():
+        log.debug("Deep poll skipped because browser is paused (solving captcha).")
+        return
+    if runtime.is_training_mode():
+        log.info("Deep poll skipped because Training Mode is active.")
+        return
 
-    def _emit(key: str, text: str) -> None:
-        if now - last.get(key, 0.0) >= config.WATCHDOG_REPEAT_SEC:
-            last[key] = now
-            alerts.append(text)
+    d_users = await discovery_users()
+    if not d_users: return
 
-    captcha = bool(snap.get("captcha"))
-    lca = snap.get("last_cycle_at") or 0.0
-    if not captcha and lca > 0 and now - lca >= config.WATCHDOG_STALL_SEC:
-        _emit("stall", (
-            f"Монитор не завершал цикл ~{int((now - lca) // 60)} мин. "
-            "Похоже, завис."
-        ))
+    log.info("Deep Scanner: starting pages 2-%d", config.DEEP_SCAN_PAGES)
+    counters = {"scraped": 0, "processed": 0, "cached": 0, "errors": 0, "deals": 0, "filtered": 0}
+    cycle_eval = {}
+    runtime_drop = {}
+    eval_sem = asyncio.Semaphore(config.DEEP_WORKERS)
+    deep_budget = {"n": config.DISCOVERY_DEEP_PER_CYCLE}
 
-    subs = snap.get("subs") or 0
-    scraped = snap.get("scraped") or 0
-    if captcha or subs == 0 or scraped > 0:
-        state["dry_since"] = None
-    else:
-        ds = state.get("dry_since")
-        if ds is None:
-            state["dry_since"] = now
-        elif now - ds >= config.WATCHDOG_DRY_SEC:
-            _emit("dry", (
-                f"Уже ~{int((now - ds) // 60)} мин ничего не собирается "
-                "при активных подписках. Возможен бан IP или смена "
-                "вёрстки Avito - проверь окно браузера."
-            ))
-    return alerts
+    try:
+        items = await browser.search(query="", city_slug=config.DISCOVERY_CITY_SLUG, min_price=config.DISCOVERY_MIN_PRICE, pages=config.DEEP_SCAN_PAGES, mode="deep")
+        counters["scraped"] += len(items)
+        for u in d_users:
+            await _handle_items(browser, items, u, notifier, eval_sem, cycle_eval, counters, runtime_drop, mode="deep", deep_budget=deep_budget)
+    except Exception as e:
+        log.warning("Deep discovery failed: %s", e)
 
 
 async def _watchdog_loop(notifier: Notifier) -> None:
+    from .monitor_logic import watchdog_decide
     state: dict = {}
     while True:
         await asyncio.sleep(config.WATCHDOG_CHECK_SEC)
         try:
-            for text in watchdog_decide(
-                runtime.snapshot(), state, time.time()
-            ):
+            for text in watchdog_decide(runtime.snapshot(), state, time.time()):
                 with contextlib.suppress(Exception):
                     await notifier.watchdog(text)
         except Exception as e:
-            log.debug("watchdog tick failed: %s", e)
+            log.debug("Watchdog tick failed: %s", e)
 
 
 async def _maintenance_loop() -> None:
-    """Periodically prune old rows so SQLite stays small for long runs."""
     while True:
         await asyncio.sleep(config.CLEANUP_INTERVAL_SEC)
         try:
             deleted = await cleanup_old_rows()
-            total = sum(deleted.values())
-            if total:
-                log.info("cleanup: removed %d rows %s", total, deleted)
+            if sum(deleted.values()):
+                log.info("Cleanup done: %s", deleted)
         except Exception as e:
-            log.warning("cleanup failed: %s", e)
+            log.warning("Cleanup failed: %s", e)
+
+
+async def _browser_refresh_loop(browser) -> None:
+    """Proactively recycle Chrome so its memory does not balloon over a long
+    run and drag the whole machine into swapping. The on-disk profile keeps
+    the anti-bot session, so no extra captchas after the restart."""
+    interval = config.BROWSER_RESTART_INTERVAL_SEC
+    if interval <= 0:
+        return
+    while True:
+        await asyncio.sleep(interval)
+        if browser.paused.is_set():
+            continue  # never interrupt a manual captcha solve
+        try:
+            log.info("Scheduled browser refresh (flushing memory).")
+            await browser.restart()
+        except Exception as e:
+            log.warning("Scheduled browser refresh failed: %s", e)
 
 
 async def run_forever(notifier: Notifier | None = None) -> None:
     notifier = notifier or ConsoleNotifier(beep=config.CAPTCHA_BEEP)
     browser = await get_browser(notifier)
-    log.info("Monitor started. Poll interval %ss.", config.POLL_INTERVAL_SEC)
-    wd = asyncio.create_task(_watchdog_loop(notifier))
-    mt = asyncio.create_task(_maintenance_loop())
-    try:
+    log.info("Monitor started. Workers: %d Fast, %d Deep", config.FAST_WORKERS, config.DEEP_WORKERS)
+    
+    async def fast_loop():
         while True:
             try:
-                await poll_once(browser, notifier)
+                await poll_fast(browser, notifier)
             except Exception as e:
-                log.exception("poll_once crashed: %s", e)
+                log.exception("Fast loop crashed: %s", e)
             await asyncio.sleep(config.POLL_INTERVAL_SEC)
+
+    async def deep_loop():
+        # Execute once immediately on startup
+        try:
+            await poll_deep(browser, notifier)
+        except Exception as e:
+            log.exception("Deep loop crashed: %s", e)
+        # Then continue with normal sleep interval
+        while True:
+            await asyncio.sleep(config.DEEP_SCAN_INTERVAL_SEC)
+            try:
+                await poll_deep(browser, notifier)
+            except Exception as e:
+                log.exception("Deep loop crashed: %s", e)
+
+    async def training_loop():
+        import random
+        current_page = 1
+        max_pages = 120
+        
+        while True:
+            if not runtime.is_training_mode():
+                current_page = 1
+                await asyncio.sleep(5)
+                continue
+            
+            if browser.paused.is_set():
+                log.debug("Training poll skipped because browser is paused (solving captcha).")
+                await asyncio.sleep(5)
+                continue
+                
+            try:
+                log.info("Training Mode: scanning page %d of %d...", current_page, max_pages)
+                items = await browser.search(
+                    query="",
+                    city_slug="rossiya",
+                    min_price=5000,
+                    pages=1,
+                    start_page=current_page,
+                    mode="deep"
+                )
+                
+                if not items:
+                    log.info("Training Mode: page %d returned no items or got blocked. Wrapping or waiting...", current_page)
+                    current_page = 1
+                    await asyncio.sleep(15)
+                    continue
+                
+                log.info("Training Mode: Found %d items on page %d. Logging prices...", len(items), current_page)
+                from .valuation.engine import learn_from_card
+                processed = 0
+                for item in items:
+                    # Let the event loop breathe between database writes
+                    await asyncio.sleep(0.02)
+                    if not runtime.is_training_mode():
+                        break
+                    
+                    if await learn_from_card(item, source="training"):
+                        processed += 1
+                
+                log.info("Training Mode: Page %d finished. Logged %d observations.", current_page, processed)
+                runtime.update_cycle(subs=0, scraped=len(items), processed=processed, cached=0, errors=0, deals=0, filtered=0, drop_reasons={})
+                
+                # Increment page number
+                current_page += 1
+                if current_page > max_pages:
+                    log.info("Training Mode: reached max page %d. Wrapping back to page 1.", max_pages)
+                    current_page = 1
+                
+                # Delay between pages to stagger requests and let telegram bot poll smoothly
+                await asyncio.sleep(random.uniform(10.0, 20.0))
+                
+            except Exception as e:
+                log.error("Training loop error: %s", e)
+                await asyncio.sleep(10)
+
+    tasks = [
+        asyncio.create_task(_watchdog_loop(notifier)),
+        asyncio.create_task(_maintenance_loop()),
+        asyncio.create_task(_browser_refresh_loop(browser)),
+        asyncio.create_task(fast_loop()),
+        asyncio.create_task(deep_loop()),
+        asyncio.create_task(training_loop()),
+    ]
+    try:
+        await asyncio.gather(*tasks)
     finally:
-        for t in (wd, mt):
-            t.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await t
+        for t in tasks: t.cancel()
         await shutdown_browser()
         await dispose_engine()
 

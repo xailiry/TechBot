@@ -1,4 +1,5 @@
 """Async DB helpers: subscriptions, dedup, card state, alert log."""
+import asyncio
 import json
 import logging
 
@@ -74,6 +75,16 @@ async def active_subscriptions() -> list[Subscription]:
         return list(rows.scalars().all())
 
 
+async def discovery_users() -> list[User]:
+    """All users with Discovery Mode enabled."""
+    async with get_session() as s:
+        rows = await s.execute(
+            select(User).where(User.discovery_enabled == 1, User.paused == 0)
+        )
+        return list(rows.scalars().all())
+
+
+
 async def register_listing(item: ParsedListing) -> bool:
     """Dedup layer 1. Returns True if this listing id is new (first seen),
     False if already processed (also refreshes last_seen / last_price)."""
@@ -103,6 +114,7 @@ async def get_cached_listing(listing_id: str) -> dict | None:
         if row is None or row.processed_at is None:
             return None
         return {
+            "id": row.id,
             "price": row.last_price,
             "processed_at": row.processed_at,
             "report": json.loads(row.report_json) if row.report_json else None,
@@ -110,6 +122,22 @@ async def get_cached_listing(listing_id: str) -> dict | None:
                 json.loads(row.valuation_json) if row.valuation_json else None
             ),
         }
+
+
+async def check_content_duplicate(item: ParsedListing) -> str | None:
+    """Returns the original listing_id if a listing with the same content hash
+    already exists. Helps detect re-posts with different IDs."""
+    h = item.get_content_hash()
+    async with get_session() as s:
+        existing = await s.execute(
+            select(Listing.id).where(
+                Listing.content_hash == h,
+                Listing.id != item.id
+            ).limit(1)
+        )
+        row = existing.first()
+        return row[0] if row else None
+
 
 
 async def cache_listing(item: ParsedListing, report, valuation) -> None:
@@ -125,6 +153,7 @@ async def cache_listing(item: ParsedListing, report, valuation) -> None:
                 source="avito",
                 url=item.full_url,
                 title=item.title,
+                content_hash=item.get_content_hash(),
                 last_price=item.price or None,
                 condition=report.condition,
                 processed_at=datetime.now(timezone.utc),
@@ -137,6 +166,7 @@ async def cache_listing(item: ParsedListing, report, valuation) -> None:
                 index_elements=[Listing.id],
                 set_={
                     "last_price": item.price or None,
+                    "content_hash": item.get_content_hash(),
                     "condition": report.condition,
                     "processed_at": datetime.now(timezone.utc),
                     "report_json": json.dumps(
@@ -151,6 +181,7 @@ async def cache_listing(item: ParsedListing, report, valuation) -> None:
         await s.execute(stmt)
 
 
+
 async def cache_listing_skipped(item: ParsedListing) -> None:
     """Mark a non-target / un-valuable listing as processed (no payload) so
     we do not re-run the pipeline on it every poll."""
@@ -162,12 +193,14 @@ async def cache_listing_skipped(item: ParsedListing) -> None:
             .values(
                 id=item.id, source="avito", url=item.full_url,
                 title=item.title, last_price=item.price or None,
+                content_hash=item.get_content_hash(),
                 processed_at=datetime.now(timezone.utc),
             )
             .on_conflict_do_update(
                 index_elements=[Listing.id],
                 set_={
                     "last_price": item.price or None,
+                    "content_hash": item.get_content_hash(),
                     "processed_at": datetime.now(timezone.utc),
                     "report_json": None,
                     "valuation_json": None,
@@ -175,6 +208,7 @@ async def cache_listing_skipped(item: ParsedListing) -> None:
             )
         )
         await s.execute(stmt)
+
 
 
 async def count_reused_images(listing_id: str, img_hash: str) -> int:
@@ -201,12 +235,33 @@ async def count_reused_images(listing_id: str, img_hash: str) -> int:
                 .order_by(ImageHash.id.desc())
                 .limit(config.DHASH_FUZZY_LIMIT)
             )
-            for other_id, other_hash in recent.all():
-                if other_id == listing_id or other_id in others:
-                    continue
-                if hamming(img_hash, other_hash) <= config.DHASH_MAX_DISTANCE:
-                    others.add(other_id)
+            recent_rows = [(r[0], r[1]) for r in recent.all()]
+            # Offload the heavy Hamming distance comparisons to a background thread
+            others = await asyncio.to_thread(
+                _find_fuzzy_matches,
+                listing_id,
+                img_hash,
+                others,
+                recent_rows,
+                config.DHASH_MAX_DISTANCE,
+            )
     return len(others)
+
+
+def _find_fuzzy_matches(
+    listing_id: str,
+    img_hash: str,
+    others: set[str],
+    recent_rows: list[tuple[str, str]],
+    max_distance: int,
+) -> set[str]:
+    res = set(others)
+    for other_id, other_hash in recent_rows:
+        if other_id == listing_id or other_id in res:
+            continue
+        if hamming(img_hash, other_hash) <= max_distance:
+            res.add(other_id)
+    return res
 
 
 async def record_image_hash(listing_id: str, img_hash: str) -> None:
@@ -303,6 +358,28 @@ async def feedback_stats(tg_id: int | None = None) -> dict:
         return {"up": up, "down": down, "total": up + down}
 
 
+async def feedback_threshold_multiplier(tg_id: int) -> float:
+    """Tiny feedback loop for delivery gates.
+
+    A few reactions are too noisy, so we only tune after 5+ labels. Mostly
+    thumbs-down means be stricter; mostly thumbs-up lets the user see slightly
+    thinner deals. The valuation itself stays deterministic and auditable.
+    """
+    st = await feedback_stats(tg_id)
+    total = st["total"]
+    if total < 5:
+        return 1.0
+    down_rate = st["down"] / total
+    up_rate = st["up"] / total
+    if down_rate >= 0.65:
+        return 1.35
+    if down_rate >= 0.50:
+        return 1.15
+    if up_rate >= 0.80:
+        return 0.85
+    return 1.0
+
+
 async def remove_subscription(tg_id: int, sub_id: int) -> bool:
     async with get_session() as s:
         sub = await s.get(Subscription, sub_id)
@@ -388,6 +465,24 @@ async def toggle_exclude_condition(tg_id: int, condition: str) -> bool:
             cur.discard(condition)
         user.exclude_conditions = ",".join(sorted(cur))
         return now_excluded
+
+
+async def set_discovery_enabled(tg_id: int, enabled: bool) -> None:
+    async with get_session() as s:
+        user = await s.get(User, tg_id)
+        if user is not None:
+            user.discovery_enabled = 1 if enabled else 0
+
+
+async def set_discovery_profit(tg_id: int, rub: int | None = None, ratio: float | None = None) -> None:
+    async with get_session() as s:
+        user = await s.get(User, tg_id)
+        if user is not None:
+            if rub is not None:
+                user.discovery_min_profit_rub = rub
+            if ratio is not None:
+                user.discovery_min_profit_ratio = ratio
+
 
 
 async def all_user_ids() -> list[int]:
