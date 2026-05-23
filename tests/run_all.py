@@ -17,6 +17,7 @@ SUITES = [
     "tests.test_block_watchdog",
     "tests.test_calibration",
     "tests.test_e2e_pipeline",
+    "tests.test_discovery",
 ]
 
 

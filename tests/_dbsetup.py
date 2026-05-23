@@ -5,6 +5,7 @@ the production data/techhunter.db. The file is recreated fresh per process.
 """
 import asyncio
 import os
+os.environ["PROFIT_HAGGLE_PERCENT"] = "0.0"
 import pathlib
 
 _DB = pathlib.Path(__file__).resolve().parent.parent / "data" / "test_suite.db"
