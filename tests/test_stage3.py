@@ -20,6 +20,8 @@ from techhunter.valuation.devices import (
 from techhunter.valuation.engine import value_listing
 from techhunter.valuation.repair import (
     estimate_repairs,
+    estimate_repairs_meta,
+    get_repair_cost_meta,
     get_repair_cost,
     set_repair_cost,
 )
@@ -67,11 +69,15 @@ def test_clustering() -> None:
           robust_median([1000, 1100, 41000, 42000, 43000, 44000, 45000])
           >= 40000)
     check("robust_median empty -> None", robust_median([]) is None)
+    check("iqr interpolation keeps centered sample",
+          robust_median([10, 11, 12, 13, 1000], drop_low_cluster=False) == 11)
 
 
 def test_shoplike() -> None:
     check("shop text", looks_shoplike("iPhone 15 Pro", "магазин, гарантия 1 год"))
     check("refurb", looks_shoplike("iPhone 15 Pro", "восстановленный, не ref"))
+    check("not ref NOT shoplike",
+          not looks_shoplike("iPhone 15 Pro", "не реф, не восстановленный"))
     check("rassrochka/trade-in",
           looks_shoplike("iPhone 15 Pro", "рассрочка, trade-in, выкуп"))
     check("seller_type shop",
@@ -145,8 +151,14 @@ async def test_devices_baseline() -> None:
         await log_observation(few, "good", p)
     check("under min sample -> None", await get_baseline(few) is None)
 
+    did_once = await get_or_create_device("apple", f"iPhone ONCE {tag}", 128)
+    check("first observation logged",
+          await log_observation(did_once, "good", 50000, listing_id="same-1"))
+    check("duplicate observation skipped",
+          not await log_observation(did_once, "good", 50000, listing_id="same-1"))
+
     # Enough real obs incl. scam lows -> learns the genuine cluster.
-    for p in (60000, 61000, 59000, 62000, 60500, 59500, 61500, 5000, 5500):
+    for p in (60000, 61000, 59000, 62000, 60500, 59500, 61500, 5000, 5500, 60200, 61100, 59800, 61200):
         await log_observation(d1, "good", p)
     base = await get_baseline(d1)
     check("baseline learned from real data",
@@ -175,6 +187,16 @@ async def test_repair() -> None:
     )
     check("repair total", total == 8000 and bd == {"screen": 8000})
     check("not blocked", blocked is False)
+    cost, estimated = await get_repair_cost_meta(
+        "apple", "iPhone 13 Pro", "screen"
+    )
+    check("default repair cost estimated", cost is not None and estimated)
+    total_meta, bd_meta, miss_meta, blocked_meta, est_meta = await estimate_repairs_meta(
+        "apple", "iPhone 13 Pro", ["screen_cracked"]
+    )
+    check("repair meta estimated",
+          total_meta is not None and bd_meta and not miss_meta
+          and blocked_meta is False and est_meta is True)
 
     total2, _, miss2, _ = await estimate_repairs(
         brand, "iPhone 13", ["back_glass_cracked"]
@@ -252,6 +274,16 @@ async def test_engine() -> None:
           vn.baseline_price is None and "no_baseline" in vn.missing
           and vn.opportunity is False)
 
+    # Unknown condition is not a clean working arbitrage.
+    devu = await get_or_create_device("apple", f"iPhone UNK {tag}", 128)
+    await set_manual_baseline(devu, 60000)
+    vu = await value_listing(
+        _item(20000), _report(f"iPhone UNK {tag}", "unknown")
+    )
+    check("unknown condition no opportunity",
+          vu.net_profit is None and vu.opportunity is False
+          and "condition_unknown" in vu.missing)
+
     # Fake suppresses opportunity even at a great price.
     devf = await get_or_create_device("apple", f"iPhone FAKE {tag}", 128)
     await set_manual_baseline(devf, 60000)
@@ -261,6 +293,25 @@ async def test_engine() -> None:
     )
     check("fake suppresses opportunity",
           vf.scam_verdict == "fake" and vf.opportunity is False)
+
+    # New but unsealed lots must not teach the used market.
+    from sqlalchemy import func, select
+    from techhunter.ai.evaluate import evaluate_listing
+    from techhunter.db import get_session
+    from techhunter.db.models import PriceObservation
+
+    new_item = _item(70000, title=f"iPhone 16 128GB новый {tag}",
+                     desc="новый телефон")
+    new_rep = await evaluate_listing(new_item, run_clip=False, do_dedup=False)
+    await value_listing(new_item, new_rep)
+    async with get_session() as s:
+        nobs = (
+            await s.execute(
+                select(func.count()).select_from(PriceObservation)
+                .where(PriceObservation.raw_title == new_item.title)
+            )
+        ).scalar()
+    check("new unsealed not learned", nobs == 0)
 
 
 def main() -> None:

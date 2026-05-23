@@ -36,6 +36,10 @@ _FAKE = [
 _REFURB = re.compile(
     r"\bреф\b|рефаб|refurb|восстановл\w*|восстановк", re.I
 )
+_NOT_REFURB = re.compile(
+    r"\b(?:не|not)\s*(?:реф|рефаб|refurb\w*|восстановл\w*|восстановк\w*)\b",
+    re.I,
+)
 _SHOP = [
     re.compile(r"\bмагазин\b", re.I),
     re.compile(r"\bопт[ом]?\b", re.I),
@@ -97,10 +101,11 @@ def looks_shoplike(
     if seller_listings is not None and seller_listings >= 30:
         return True
     text = normalize_homoglyphs(f"{title} {description}")
+    shop_text = _NOT_REFURB.sub(" ", text)
     return (
-        _any(text, _SHOP)
-        or _any(text, _RETAIL)
-        or bool(_REFURB.search(text))
+        _any(shop_text, _SHOP)
+        or _any(shop_text, _RETAIL)
+        or bool(_REFURB.search(shop_text))
     )
 
 

@@ -6,10 +6,12 @@ accumulate and the more accurate the medians become. Per condition tier
 (ideal / good / defect / broken / for_parts) a separate median is learned.
 """
 import logging
+import asyncio
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import config
 from ..db import get_session
@@ -17,6 +19,15 @@ from ..db.models import DeviceCatalog, MarketBaseline, PriceObservation
 from .clustering import robust_median
 
 log = logging.getLogger(__name__)
+_relearn_locks: dict[int, asyncio.Lock] = {}
+
+
+def _relearn_lock(device_id: int) -> asyncio.Lock:
+    lock = _relearn_locks.get(device_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _relearn_locks[device_id] = lock
+    return lock
 
 
 def _age_seconds(dt: datetime) -> float:
@@ -75,6 +86,19 @@ async def log_observation(
     if not (config.PRICE_ABS_FLOOR <= price <= config.PRICE_ABS_CEIL):
         return False
     async with get_session() as s:
+        if listing_id:
+            exists = await s.execute(
+                select(PriceObservation.id)
+                .where(
+                    PriceObservation.source == source,
+                    PriceObservation.listing_id == listing_id,
+                    PriceObservation.device_id == device_id,
+                    PriceObservation.condition == condition,
+                )
+                .limit(1)
+            )
+            if exists.first() is not None:
+                return False
         s.add(
             PriceObservation(
                 device_id=device_id,
@@ -89,45 +113,52 @@ async def log_observation(
     return True
 
 
-async def _prices(device_id: int, conditions) -> list[int]:
+async def _prices(device_id: int, conditions, session: AsyncSession | None = None) -> list[int]:
     cutoff = datetime.now(timezone.utc) - timedelta(
         days=config.BASELINE_LOOKBACK_DAYS
     )
-    async with get_session() as s:
-        rows = await s.execute(
-            select(PriceObservation.price)
-            .where(
-                PriceObservation.device_id == device_id,
-                PriceObservation.condition.in_(tuple(conditions)),
-                PriceObservation.price >= config.PRICE_ABS_FLOOR,
-                PriceObservation.observed_at >= cutoff,
-            )
-            .order_by(PriceObservation.observed_at.desc())
-            .limit(config.BASELINE_MAX_SAMPLE)
+    stmt = (
+        select(PriceObservation.price)
+        .where(
+            PriceObservation.device_id == device_id,
+            PriceObservation.condition.in_(tuple(conditions)),
+            PriceObservation.price >= config.PRICE_ABS_FLOOR,
+            PriceObservation.observed_at >= cutoff,
         )
+        .order_by(PriceObservation.observed_at.desc())
+        .limit(config.BASELINE_MAX_SAMPLE)
+    )
+    if session is not None:
+        rows = await session.execute(stmt)
+        return [r[0] for r in rows.all()]
+    async with get_session() as s:
+        rows = await s.execute(stmt)
         return [r[0] for r in rows.all()]
 
 
 async def _upsert_baseline(
-    device_id: int, condition: str, median: int, sample: int
+    device_id: int, condition: str, median: int, sample: int, session: AsyncSession | None = None
 ) -> None:
-    async with get_session() as s:
-        stmt = (
-            sqlite_insert(MarketBaseline)
-            .values(
-                device_id=device_id,
-                condition=condition,
-                median_price=median,
-                sample_size=sample,
-            )
-            .on_conflict_do_update(
-                index_elements=[
-                    MarketBaseline.device_id, MarketBaseline.condition
-                ],
-                set_={"median_price": median, "sample_size": sample},
-            )
+    stmt = (
+        sqlite_insert(MarketBaseline)
+        .values(
+            device_id=device_id,
+            condition=condition,
+            median_price=median,
+            sample_size=sample,
         )
-        await s.execute(stmt)
+        .on_conflict_do_update(
+            index_elements=[
+                MarketBaseline.device_id, MarketBaseline.condition
+            ],
+            set_={"median_price": median, "sample_size": sample},
+        )
+    )
+    if session is not None:
+        await session.execute(stmt)
+    else:
+        async with get_session() as s:
+            await s.execute(stmt)
 
 
 # Sane band for each tier relative to the (reliable) working baseline.
@@ -143,28 +174,40 @@ _TIER_BAND = {
 }
 
 
-async def _delete_baseline(device_id: int, condition: str) -> None:
-    async with get_session() as s:
-        row = (
-            await s.execute(
-                select(MarketBaseline).where(
-                    MarketBaseline.device_id == device_id,
-                    MarketBaseline.condition == condition,
-                )
-            )
-        ).scalar_one_or_none()
+async def _delete_baseline(device_id: int, condition: str, session: AsyncSession | None = None) -> None:
+    stmt = select(MarketBaseline).where(
+        MarketBaseline.device_id == device_id,
+        MarketBaseline.condition == condition,
+    )
+    if session is not None:
+        row = (await session.execute(stmt)).scalar_one_or_none()
         if row is not None:
-            await s.delete(row)
+            await session.delete(row)
+    else:
+        async with get_session() as s:
+            row = (await s.execute(stmt)).scalar_one_or_none()
+            if row is not None:
+                await s.delete(row)
 
 
-async def relearn(device_id: int) -> int | None:
+async def relearn(device_id: int, session: AsyncSession | None = None) -> int | None:
     """Recompute the working baseline plus every per-condition tier.
 
     The working baseline is the trustworthy number (most data, centered on
     the used bulk). Per-condition tiers are only kept when they have enough
     data AND sit in a sane band around working; otherwise the stale/illogical
     tier is deleted. We never guess."""
-    working_prices = await _prices(device_id, WORKING_GRADES)
+    async with _relearn_lock(device_id):
+        if session is not None:
+            return await _relearn_with_session(device_id, session)
+        async with get_session() as s:
+            res = await _relearn_with_session(device_id, s)
+            await s.commit()
+            return res
+
+
+async def _relearn_with_session(device_id: int, session: AsyncSession) -> int | None:
+    working_prices = await _prices(device_id, WORKING_GRADES, session=session)
     working_median: int | None = None
     if len(working_prices) >= config.BASELINE_MIN_SAMPLE:
         working_median = robust_median(working_prices, drop_low_cluster=True)
@@ -172,15 +215,16 @@ async def relearn(device_id: int) -> int | None:
         await _upsert_baseline(
             device_id, WORKING_CONDITION, working_median,
             len(working_prices),
+            session=session,
         )
     else:
         # No reliable anchor -> drop everything; better silent than wrong.
         for cond in (WORKING_CONDITION, *ALL_CONDITIONS):
-            await _delete_baseline(device_id, cond)
+            await _delete_baseline(device_id, cond, session=session)
         return None
 
     for cond in ALL_CONDITIONS:
-        pts = await _prices(device_id, (cond,))
+        pts = await _prices(device_id, (cond,), session=session)
         med = (
             robust_median(pts, drop_low_cluster=cond in WORKING_GRADES)
             if len(pts) >= config.BASELINE_MIN_SAMPLE_COND
@@ -188,9 +232,9 @@ async def relearn(device_id: int) -> int | None:
         )
         lo, hi = _TIER_BAND[cond]
         if med and lo * working_median <= med <= hi * working_median:
-            await _upsert_baseline(device_id, cond, med, len(pts))
+            await _upsert_baseline(device_id, cond, med, len(pts), session=session)
         else:
-            await _delete_baseline(device_id, cond)
+            await _delete_baseline(device_id, cond, session=session)
 
     return working_median
 
@@ -275,6 +319,54 @@ async def prices_for_model(
                     "tiers": tiers,
                 })
         return out
+
+
+async def count_working_baselines() -> int:
+    """How many devices currently have a usable working baseline. Powers the
+    Discovery warm-up progress line so the operator can see it is learning."""
+    async with get_session() as s:
+        return (
+            await s.execute(
+                select(func.count())
+                .select_from(MarketBaseline)
+                .where(
+                    MarketBaseline.condition == WORKING_CONDITION,
+                    MarketBaseline.sample_size >= config.BASELINE_MIN_SAMPLE,
+                )
+            )
+        ).scalar() or 0
+
+
+async def learned_devices(limit: int = 12, offset: int = 0) -> list[dict]:
+    """Paginated list of every device with a usable working baseline,
+    most-confident (largest sample) first. Powers the price-knowledge screen."""
+    async with get_session() as s:
+        rows = (
+            await s.execute(
+                select(
+                    DeviceCatalog.brand,
+                    DeviceCatalog.model,
+                    DeviceCatalog.storage_gb,
+                    MarketBaseline.median_price,
+                    MarketBaseline.sample_size,
+                )
+                .join(MarketBaseline, MarketBaseline.device_id == DeviceCatalog.id)
+                .where(
+                    MarketBaseline.condition == WORKING_CONDITION,
+                    MarketBaseline.sample_size >= config.BASELINE_MIN_SAMPLE,
+                )
+                .order_by(MarketBaseline.sample_size.desc())
+                .limit(limit)
+                .offset(offset)
+            )
+        ).all()
+    out = []
+    for b, m, st, price, sample in rows:
+        label = m or b
+        if st:
+            label += f" {st}GB"
+        out.append({"label": label, "price": int(price), "sample": int(sample)})
+    return out
 
 
 async def learning_overview(limit: int = 8) -> dict:

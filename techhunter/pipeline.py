@@ -19,7 +19,7 @@ log = logging.getLogger(__name__)
 
 
 async def process_new_listing(
-    browser, item: ParsedListing
+    browser, item: ParsedListing, mode: str = "fast"
 ) -> tuple[EvaluationReport | None, Valuation | None]:
     # Cheap gate: skip anything whose title is not a recognised device
     # (accessories, glass, cases, chargers, unrelated phones).
@@ -27,7 +27,7 @@ async def process_new_listing(
         return None, None
 
     try:
-        item = await browser.fetch_details(item)
+        item = await browser.fetch_details(item, mode=mode)
     except Exception as e:
         log.debug("fetch_details failed for %s: %s", item.id, e)
 

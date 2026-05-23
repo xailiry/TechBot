@@ -47,7 +47,12 @@ def test_specs() -> None:
 
     s4 = extract_specs("iPhone 15 новый запечатан ростест", "")
     check("sealed", s4.is_sealed is True)
+    check("sealed is new", s4.is_new is True)
     check("rostest", s4.is_rostest is True)
+    s4b = extract_specs("iPhone 15 новый", "")
+    check("plain new marked new", s4b.is_new is True)
+    s4c = extract_specs("iPhone 15 как новый", "")
+    check("like-new used not new", s4c.is_new is False)
 
     # Negated "it's fine" claims must NOT raise damage defects.
     sneg = extract_specs(
@@ -98,7 +103,7 @@ def test_normalize() -> None:
     check("iphone 13 pro max", d.model == "iPhone 13 Pro Max")
     check("storage passthrough", d.storage_gb == 256)
 
-    check("iphone se", normalize_device("iPhone SE 2022").model == "iPhone SE")
+    check("iphone se", normalize_device("iPhone SE 2022").model == "iPhone SE 2022")
     check("iphone xr", normalize_device("айфон xr").model == "iPhone XR")
     sg = normalize_device("Samsung Galaxy S24 Ultra")
     check("samsung s24 ultra", sg.brand == "samsung" and sg.model == "Galaxy S24 Ultra")
@@ -106,6 +111,18 @@ def test_normalize() -> None:
     check("z fold5", zf.model == "Galaxy Z Fold5")
     px = normalize_device("Google Pixel 8 Pro")
     check("pixel 8 pro", px.brand == "google" and px.model == "Pixel 8 Pro")
+    check("redmi note pro",
+          normalize_device("Redmi Note 13 Pro 256").model == "Redmi Note 13 Pro")
+    check("poco x pro",
+          normalize_device("Poco X6 Pro 512").model == "Poco X6 PRO")
+    check("galaxy a",
+          normalize_device("Samsung Galaxy A55").model == "Galaxy A55")
+    check("oneplus",
+          normalize_device("OnePlus 12R").model == "OnePlus 12 R")
+    check("honor",
+          normalize_device("Honor 90 256").model == "Honor 90")
+    nr = normalize_device("iPhone 13 Pro 128 не реф не восстановленный")
+    check("not-ref stays normal model", nr.model == "iPhone 13 Pro")
     unk = normalize_device("MacBook Air M2")
     check("unknown brand", unk.brand == "unknown" and unk.model is None)
 

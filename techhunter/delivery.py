@@ -33,7 +33,10 @@ def passes_filters(prefs: DeliveryPrefs, item, report, valuation):
     and future analytics), None when delivered."""
     if prefs.paused:
         return False, "paused"
-    if prefs.exclude_shop and getattr(item, "seller_type", None) == "shop":
+    if prefs.exclude_shop and (
+        getattr(item, "seller_type", None) == "shop"
+        or getattr(valuation, "shoplike", False)
+    ):
         return False, "shop"
     if (
         prefs.min_score

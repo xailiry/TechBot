@@ -70,8 +70,16 @@ def _iqr_trim(prices: list[int], k: float = 1.5) -> list[int]:
     n = len(s)
     if n < 4:
         return s
-    q1 = s[n // 4]
-    q3 = s[(3 * n) // 4]
+
+    def _quantile(q: float) -> float:
+        pos = (n - 1) * q
+        lo = int(pos)
+        hi = min(lo + 1, n - 1)
+        frac = pos - lo
+        return s[lo] + (s[hi] - s[lo]) * frac
+
+    q1 = _quantile(0.25)
+    q3 = _quantile(0.75)
     iqr = q3 - q1
     lo, hi = q1 - k * iqr, q3 + k * iqr
     trimmed = [p for p in s if lo <= p <= hi]

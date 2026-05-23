@@ -17,7 +17,9 @@ class ParsedListing(BaseModel):
     currency: str = "RUB"
     url: str
     location: str = ""
+    date_text: str = ""
     image: str | None = None
+
     snippet: str = ""
 
     # Enriched from the detail page (Stage 2 consumes these).
@@ -51,3 +53,10 @@ class ParsedListing(BaseModel):
     def chat_url(self) -> str:
         base = self.full_url
         return f"{base}#chat" if "avito.ru" in base else base
+
+    def get_content_hash(self) -> str:
+        """Stable card-level hash to detect re-posts with a new listing id."""
+        import hashlib
+
+        payload = f"{self.title}|{self.location}|{self.image or ''}"
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()

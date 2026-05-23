@@ -34,6 +34,10 @@ def test_pure() -> None:
     ok, why = passes_filters(
         DeliveryPrefs(exclude_shop=True), _io("shop"), rep, val)
     check("shop dropped", not ok and why == "shop")
+    ok, why = passes_filters(
+        DeliveryPrefs(exclude_shop=True), _io(), rep,
+        SimpleNamespace(scam_score=70, shoplike=True))
+    check("cached shoplike dropped", not ok and why == "shop")
     ok, _ = passes_filters(
         DeliveryPrefs(exclude_shop=True), _io("private"), rep, val)
     check("private kept", ok)

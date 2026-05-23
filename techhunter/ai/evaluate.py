@@ -34,6 +34,7 @@ class EvaluationReport(BaseModel):
     defects: list[str] = Field(default_factory=list)
     is_rostest: bool = False
     is_sealed: bool = False
+    is_new: bool = False
 
     # CLIP visual flags (None == unknown / engine unavailable).
     visual: dict = Field(default_factory=dict)
@@ -96,6 +97,7 @@ async def evaluate_listing(
         defects=sorted(specs.defects),
         is_rostest=specs.is_rostest,
         is_sealed=specs.is_sealed,
+        is_new=specs.is_new,
     )
 
     images = item.images or ([item.image] if item.image else [])

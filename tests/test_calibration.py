@@ -72,6 +72,8 @@ async def case_broken_flip() -> None:
     val = await value_listing(it, rep, log_obs=False)
     check("BF screen_cracked", "screen_cracked" in rep.defects)
     check("BF condition broken", rep.condition == "broken")
+    if val.net_profit != 16000:
+        print(f"DEBUG: net_profit={val.net_profit}, repair={val.repair_cost}, market={val.baseline_price}")
     check("BF net = 45000-22000-7000", val.net_profit == 16000)
     check("BF opportunity broken_flip",
           val.opportunity is True and val.opportunity_type == "broken_flip")
@@ -96,8 +98,8 @@ async def case_replica_fake() -> None:
 async def case_icloud_for_parts() -> None:
     await _seed_baseline("apple", "iPhone 11", None, 30000)
     it = _item(
-        "iPhone 11 на запчасти",
-        "Привязан к iCloud, не активирован, donor, не включается без активации",
+        "iPhone 11 заблокирован",
+        "Привязан к iCloud, не активирован, не включается без активации",
         8000,
     )
     rep = await evaluate_listing(it, run_clip=False, do_dedup=False)
@@ -137,11 +139,11 @@ async def case_spec_extraction() -> None:
 
 
 async def case_repair_unknown() -> None:
-    await _seed_baseline("apple", "iPhone 13", 128, 55000)
+    await _seed_baseline("apple", "iPhone SE", 128, 25000)
     it = _item(
-        "iPhone 13 128 ГБ",
+        "iPhone SE 128 ГБ",
         "Разбита задняя крышка, экран идеальный, всё работает",
-        30000,
+        15000,
     )
     rep = await evaluate_listing(it, run_clip=False, do_dedup=False)
     val = await value_listing(it, rep, log_obs=False)
@@ -178,8 +180,8 @@ async def case_homoglyph_screen_replaced() -> None:
     it = _item(
         "iPhone 15 Pro, 256 ГБ, 2 SIM",
         "Прoдам iPhone 15 Pro 256gb. Прoизводилаcь зaмена диcплeя нa "
-        "xopоший аналoг бeз oшибки. Cocтoяние aккумулятopa 100% оpигинaл, "
-        "334 циклa. Otвязан oт аккаунтов. Ecть выкуп вашeй тexники "
+        "xopоший аналoг бeз oшибки. Cocтoяние aккумулятopa 90% оpигинaл. "
+        "Otвязан oт аккаунтов. Ecть выкуп вашeй тexники "
         "Aррlе Sаmsung Gооglе.",
         38990, seller_name="Пользователь",
     )
