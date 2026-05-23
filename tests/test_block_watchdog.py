@@ -4,7 +4,7 @@ import tests._dbsetup  # noqa: F401  (must precede techhunter imports)
 import sys
 
 from techhunter import config
-from techhunter.monitor import watchdog_decide
+from techhunter.monitor_logic import watchdog_decide
 from techhunter.scraper.parser import (
     has_detail,
     has_listings,

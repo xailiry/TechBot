@@ -118,12 +118,37 @@ async def test_restart_rate_limited() -> None:
     check("no restart on timeout", calls["start"] == 0)
 
 
+async def test_pools_independent() -> None:
+    b = AvitoBrowser()
+
+    async def _noop():
+        return None
+
+    b.start = _noop  # type: ignore
+    b._fast_pool = asyncio.Queue()
+    b._deep_pool = asyncio.Queue()
+    
+    p_fast = FakePage()
+    p_deep = FakePage()
+    b._fast_pool.put_nowait(p_fast)
+    b._deep_pool.put_nowait(p_deep)
+    
+    async with b.acquire_page(mode="fast") as pg:
+        check("got fast page", pg is p_fast)
+    check("fast pool size returned", b._fast_pool.qsize() == 1)
+    
+    async with b.acquire_page(mode="deep") as pg:
+        check("got deep page", pg is p_deep)
+    check("deep pool size returned", b._deep_pool.qsize() == 1)
+
+
 def main() -> None:
     test_is_closed_error()
     asyncio.run(test_acquire_pooled())
     asyncio.run(test_acquire_transient_on_exhaust())
     asyncio.run(test_release_after_pool_swap())
     asyncio.run(test_restart_rate_limited())
+    asyncio.run(test_pools_independent())
     print("\nAll browser-resilience checks passed.")
 
 

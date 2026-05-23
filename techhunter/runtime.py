@@ -17,6 +17,8 @@ _STATE: dict = {
     "filtered": 0,
     "drop_reasons": {},  # reason -> count (why a deal was not delivered)
     "captcha": False,
+    "training_mode": False,
+    "training_pid": None,
 }
 
 
@@ -26,6 +28,14 @@ def update_cycle(**kw) -> None:
 
 def set_captcha(active: bool) -> None:
     _STATE["captcha"] = active
+
+
+def set_training_mode(active: bool) -> None:
+    _STATE["training_mode"] = active
+
+
+def is_training_mode() -> bool:
+    return _STATE.get("training_mode", False)
 
 
 def snapshot() -> dict:

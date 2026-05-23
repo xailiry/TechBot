@@ -3,9 +3,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv()
-
 BASE_DIR = Path(__file__).resolve().parent.parent
+load_dotenv(BASE_DIR / ".env")
 DATA_DIR = BASE_DIR / "data"
 LOG_DIR = BASE_DIR / "logs"
 DATA_DIR.mkdir(exist_ok=True)
@@ -13,6 +12,7 @@ LOG_DIR.mkdir(exist_ok=True)
 
 # Telegram
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+TELEGRAM_PROXY = os.getenv("TELEGRAM_PROXY", "").strip()
 ADMIN_USER_IDS = {
     int(x) for x in os.getenv("ADMIN_USER_IDS", "").split(",") if x.strip().isdigit()
 }
@@ -36,10 +36,17 @@ BROWSER_CHANNEL = os.getenv("BROWSER_CHANNEL", "chrome")
 PAGE_POOL_SIZE = int(os.getenv("PAGE_POOL_SIZE", "5"))
 # If the page pool is exhausted, wait this long, then use a transient
 # throwaway tab instead of blocking forever (no deadlock).
-PAGE_ACQUIRE_TIMEOUT_SEC = float(os.getenv("PAGE_ACQUIRE_TIMEOUT_SEC", "20"))
+PAGE_ACQUIRE_TIMEOUT_SEC = float(os.getenv("PAGE_ACQUIRE_TIMEOUT_SEC", "2.0"))
 # Min seconds between automatic browser restarts (crash recovery).
 BROWSER_RESTART_COOLDOWN_SEC = int(
     os.getenv("BROWSER_RESTART_COOLDOWN_SEC", "30")
+)
+# Proactively recycle Chrome on this interval to flush accumulated memory.
+# A visible persistent-profile browser rendering heavy Avito pages balloons
+# to several GB over a long run and slows the whole machine down. The on-disk
+# profile keeps the anti-bot session across the restart. 0 disables.
+BROWSER_RESTART_INTERVAL_SEC = int(
+    os.getenv("BROWSER_RESTART_INTERVAL_SEC", "600")
 )
 NAV_TIMEOUT_MS = int(os.getenv("NAV_TIMEOUT_MS", "30000"))
 
@@ -51,8 +58,17 @@ AVITO_SORT_BY_DATE = int(os.getenv("AVITO_SORT_BY_DATE", "104"))
 # ─── Polling loop ───────────────────────────────────────────────────────────
 POLL_INTERVAL_SEC = int(os.getenv("POLL_INTERVAL_SEC", "20"))
 SUBSCRIPTION_STAGGER_SEC = float(os.getenv("SUBSCRIPTION_STAGGER_SEC", "0.3"))
+
+# Multi-worker split: reserve some tabs for fast page-1 scans, 
+# and use others for slower deep scans (pages 2+).
+FAST_WORKERS = int(os.getenv("FAST_WORKERS", "2"))
+DEEP_WORKERS = int(os.getenv("DEEP_WORKERS", str(max(1, PAGE_POOL_SIZE - FAST_WORKERS))))
+DEEP_SCAN_INTERVAL_SEC = int(os.getenv("DEEP_SCAN_INTERVAL_SEC", "300"))  # 5 min
+DEEP_SCAN_PAGES = int(os.getenv("DEEP_SCAN_PAGES", "12"))
+
 # Newest-sorted: new lots land on page 1, so 1 page keeps cycles fast.
 DEFAULT_SEARCH_PAGES = int(os.getenv("DEFAULT_SEARCH_PAGES", "1"))
+
 PAGE_TURN_DELAY_SEC = (
     float(os.getenv("PAGE_TURN_DELAY_MIN", "0.8")),
     float(os.getenv("PAGE_TURN_DELAY_MAX", "1.8")),
@@ -117,13 +133,37 @@ SENT_ALERT_RETENTION_DAYS = int(os.getenv("SENT_ALERT_RETENTION_DAYS", "30"))
 # Reseller overhead per flip (cleaning, shipping, fees) in RUB. Real number;
 # defaults to 0 so we never inflate profit with a made-up cost.
 PROFIT_OVERHEAD_RUB = int(os.getenv("PROFIT_OVERHEAD_RUB", "0"))
+# Average discount expected during haggling (e.g. 0.05 = 5% off market).
+PROFIT_HAGGLE_PERCENT = float(os.getenv("PROFIT_HAGGLE_PERCENT", "0.05"))
 # A lot is surfaced as a deal only above both thresholds.
 MIN_PROFIT_RUB = int(os.getenv("MIN_PROFIT_RUB", "3000"))
 MIN_PROFIT_RATIO = float(os.getenv("MIN_PROFIT_RATIO", "0.12"))
+
+# ─── Fast Valuation (Stage 1 / Speed) ───────────────────────────────────────
+# If item.price < (market * (1 - HAGGLE) * threshold), trigger Stage 2.
+# 0.90 = we deep-evaluate if it looks like at least a 10% "pre-profit".
+FAST_VALUATION_THRESHOLD_PCT = float(os.getenv("FAST_VALUATION_THRESHOLD_PCT", "0.90"))
+
+# ─── Discovery Mode (Broad Category Scan) ───────────────────────────────────
+# Polling the whole category for any deal that matches these thresholds.
+DISCOVERY_MIN_PROFIT_RUB = int(os.getenv("DISCOVERY_MIN_PROFIT_RUB", "7000"))
+DISCOVERY_MIN_PROFIT_RATIO = float(os.getenv("DISCOVERY_MIN_PROFIT_RATIO", "0.20"))
+DISCOVERY_CITY_SLUG = os.getenv("DISCOVERY_CITY_SLUG", "rossiya")
+# Junk floor: the category scan ignores everything below this price, which
+# cheaply drops "старое говно" (ancient/worthless phones). No-name Chinese
+# brands are already excluded by the model normalizer. Raise to be stricter,
+# lower to also chase cheap broken-flip lots.
+DISCOVERY_MIN_PRICE = int(os.getenv("DISCOVERY_MIN_PRICE", "5000"))
+# Discovery learns baselines cheaply from search cards (title + price, no
+# detail fetch). It only OPENS a listing when it already looks like a deal.
+# This caps such deep evaluations per scan cycle so a mispriced baseline
+# cannot trigger a flood of detail fetches (captcha/IP-ban protection).
+DISCOVERY_DEEP_PER_CYCLE = int(os.getenv("DISCOVERY_DEEP_PER_CYCLE", "15"))
+
 # Baselines are learned from real observations only and keep adapting
 # forever (never locked). Per-condition tiers learn separately.
-BASELINE_MIN_SAMPLE = int(os.getenv("BASELINE_MIN_SAMPLE", "8"))
-BASELINE_MIN_SAMPLE_COND = int(os.getenv("BASELINE_MIN_SAMPLE_COND", "8"))
+BASELINE_MIN_SAMPLE = int(os.getenv("BASELINE_MIN_SAMPLE", "12"))
+BASELINE_MIN_SAMPLE_COND = int(os.getenv("BASELINE_MIN_SAMPLE_COND", "12"))
 # Confidence labels for the card (sample size + freshness of the baseline).
 CONF_HIGH_SAMPLE = int(os.getenv("CONF_HIGH_SAMPLE", "25"))
 CONF_MED_SAMPLE = int(os.getenv("CONF_MED_SAMPLE", "12"))

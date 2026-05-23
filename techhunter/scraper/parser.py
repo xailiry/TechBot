@@ -75,6 +75,9 @@ def _parse_card(card: Tag) -> ParsedListing | None:
                 or (img.get("srcset") or "").split(" ")[0]
             )
 
+        date_el = card.find(attrs={"data-marker": "item-date"})
+        date_text = date_el.get_text(strip=True) if date_el else ""
+
         return ParsedListing(
             id=str(item_id),
             title=title,
@@ -82,6 +85,7 @@ def _parse_card(card: Tag) -> ParsedListing | None:
             currency="RUB",
             url=url or "",
             location=location,
+            date_text=date_text,
             image=image,
             snippet=card.get_text(" ", strip=True),
         )

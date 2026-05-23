@@ -38,7 +38,10 @@ class AvitoBrowser:
         self.notifier = notifier
         self._pw = None
         self._ctx: BrowserContext | None = None
+        self._pool: asyncio.Queue[Page] | None = None
         self._available: asyncio.Queue[Page] | None = None
+        self._fast_pool = None
+        self._deep_pool = None
         self._lock = asyncio.Lock()
         # Set while a captcha is being solved; lets the monitor observe state.
         self.paused = asyncio.Event()
@@ -52,6 +55,8 @@ class AvitoBrowser:
         self._restart_lock = asyncio.Lock()
         self._last_restart = 0.0
         self._last_captcha_notify = 0.0
+        # Pages currently actively waiting in _ensure_unblocked
+        self._blocked_pages: set[Page] = set()
 
     @staticmethod
     def _is_closed_error(err: object) -> bool:
@@ -66,6 +71,12 @@ class AvitoBrowser:
                 "browser closed", "websocket",
             )
         )
+
+    @staticmethod
+    def _is_page_closed(page: Page) -> bool:
+        if hasattr(page, "is_closed"):
+            return page.is_closed()
+        return getattr(page, "closed", False)
 
     async def _new_stealth_page(self) -> Page:
         assert self._ctx is not None
@@ -102,6 +113,15 @@ class AvitoBrowser:
             if self._ctx:
                 return
             os.makedirs(config.BROWSER_PROFILE_DIR, exist_ok=True)
+            # Remove Chrome profile lock files if they exist on Windows/Linux to prevent startup freezes
+            for lock_name in ("SingletonLock", "lock", "parent.lock"):
+                lock_file = os.path.join(config.BROWSER_PROFILE_DIR, lock_name)
+                if os.path.exists(lock_file):
+                    try:
+                        os.remove(lock_file)
+                        log.info("Browser: removed stale lock file %s", lock_name)
+                    except Exception as le:
+                        log.debug("Browser: could not remove stale lock file %s: %s", lock_name, le)
             self._pw = await async_playwright().start()
 
             base_args = [
@@ -136,7 +156,10 @@ class AvitoBrowser:
 
             from playwright_stealth import Stealth
 
-            self._available = asyncio.Queue()
+            self._pool = asyncio.Queue()
+            self._fast_pool = self._pool
+            self._deep_pool = self._pool
+            self._available = self._pool
             existing = list(self._ctx.pages)
             for i in range(config.PAGE_POOL_SIZE):
                 if i < len(existing):
@@ -145,7 +168,14 @@ class AvitoBrowser:
                         await Stealth().apply_stealth_async(page)
                 else:
                     page = await self._new_stealth_page()
-                self._available.put_nowait(page)
+                
+                self._pool.put_nowait(page)
+
+            # Close any extra pages restored by Chrome from previous sessions
+            if len(existing) > config.PAGE_POOL_SIZE:
+                for page in existing[config.PAGE_POOL_SIZE:]:
+                    with contextlib.suppress(Exception):
+                        await page.close()
 
     async def stop(self) -> None:
         if self._ctx:
@@ -156,37 +186,81 @@ class AvitoBrowser:
             with contextlib.suppress(Exception):
                 await self._pw.stop()
             self._pw = None
+        self._pool = None
         self._available = None
+        self._fast_pool = None
+        self._deep_pool = None
 
     @contextlib.asynccontextmanager
-    async def acquire_page(self):
+    async def acquire_page(self, mode: str = "fast"):
         await self.start()
-        assert self._available is not None
-        q = self._available  # capture: a restart swaps this out
+        
+        # Fallback to _fast_pool, _deep_pool, or _available if unified _pool is not initialized (e.g. in tests)
+        fast_pool = self._fast_pool if self._fast_pool is not None else self._available
+        deep_pool = self._deep_pool if self._deep_pool is not None else self._available
+        q = self._pool if self._pool is not None else (deep_pool if mode == "deep" else fast_pool)
+        
+        assert q is not None
+        
+        page = None
         transient = False
+        
+        # If captcha is active, wait until it is resolved first
+        while self.paused.is_set():
+            log.debug("acquire_page: captcha active, waiting for resolution")
+            await self._unblocked.wait()
+            
         try:
-            page = q.get_nowait()
-        except asyncio.QueueEmpty:
             try:
-                page = await asyncio.wait_for(
-                    q.get(), timeout=config.PAGE_ACQUIRE_TIMEOUT_SEC
-                )
-            except asyncio.TimeoutError:
-                # Pool oversubscribed (onboarding + multi-sub + probe).
-                # Use a throwaway tab so we NEVER deadlock the monitor.
+                page = q.get_nowait()
+            except asyncio.QueueEmpty:
+                try:
+                    page = await asyncio.wait_for(
+                        q.get(), timeout=config.PAGE_ACQUIRE_TIMEOUT_SEC
+                    )
+                except asyncio.TimeoutError:
+                    # If captcha was activated during the wait, do not create a transient tab.
+                    # Wait for unblock and retry.
+                    if self.paused.is_set():
+                        log.debug("acquire_page: captcha activated during wait, retrying")
+                        await self._unblocked.wait()
+                        # Recursively call/retry to acquire page safely
+                        async with self.acquire_page(mode=mode) as p:
+                            yield p
+                        return
+                    
+                    # Pool truly oversubscribed. Use a throwaway tab.
+                    page = await self._new_stealth_page()
+                    transient = True
+                    log.debug("page pool exhausted; using transient tab")
+            
+            # If the page we got from the pool is dead/closed, replace it on-the-fly!
+            if not transient and (page is None or self._is_page_closed(page)):
+                log.warning("acquire_page: page from pool is closed/dead, replacing on-the-fly")
+                if page is not None:
+                    with contextlib.suppress(Exception):
+                        await page.close()
                 page = await self._new_stealth_page()
-                transient = True
-                log.debug("page pool exhausted; using transient tab")
-        try:
+            
             yield page
+            
         finally:
-            if transient or self._available is not q:
-                # Restart replaced the pool, or this was a throwaway tab:
-                # close it instead of poisoning the (new) pool.
-                with contextlib.suppress(Exception):
-                    await page.close()
-            else:
-                q.put_nowait(page)
+            if page is not None:
+                current_pool = self._pool if self._pool is not None else (self._deep_pool if mode == "deep" else (self._fast_pool if self._fast_pool is not None else self._available))
+                if transient or q is not current_pool:
+                    # Transient or pool was replaced during a restart
+                    with contextlib.suppress(Exception):
+                        await page.close()
+                else:
+                    if self._is_page_closed(page):
+                        log.warning("acquire_page: page is closed, creating replacement page for the pool")
+                        try:
+                            replacement_page = await self._new_stealth_page()
+                            q.put_nowait(replacement_page)
+                        except Exception as pe:
+                            log.error("acquire_page: failed to create replacement page: %s", pe)
+                    else:
+                        q.put_nowait(page)
 
     # ─── captcha suspension (session-wide, single-flight) ───────────────────
 
@@ -197,6 +271,20 @@ class AvitoBrowser:
             )
             await asyncio.sleep(random.uniform(0.4, 1.0))
 
+    async def _reload_safe(self, page: Page) -> None:
+        with contextlib.suppress(Exception):
+            await page.reload(
+                wait_until="domcontentloaded", timeout=config.NAV_TIMEOUT_MS
+            )
+
+    async def _reload_safe_staggered(self, page: Page) -> None:
+        await asyncio.sleep(random.uniform(0.5, 3.0))
+        with contextlib.suppress(Exception):
+            if not page.is_closed() and page.url != "about:blank":
+                await page.reload(
+                    wait_until="domcontentloaded", timeout=config.NAV_TIMEOUT_MS
+                )
+
     async def _probe_clear(self) -> bool:
         """Check if the IP block is gone WITHOUT touching the pooled tabs
         the operator may be solving. Throwaway tab on a stable search URL;
@@ -206,7 +294,7 @@ class AvitoBrowser:
             return False
         probe = None
         try:
-            probe = await self._ctx.new_page()
+            probe = await self._new_stealth_page()
             await probe.goto(
                 config.AVITO_BASE_URL + config.AVITO_PROBE_PATH,
                 wait_until="domcontentloaded",
@@ -223,7 +311,7 @@ class AvitoBrowser:
                     await probe.close()
 
     async def _run_captcha_wait(self, url: str) -> bool:
-        """First detector only: notify once, poll an out-of-band probe until
+        """First detector only: notify once, poll open pages and out-of-band probe until
         the human solves the captcha on any one tab."""
         self.paused.set()
         # Throttle: a long block re-enters the gate every cycle; do not
@@ -243,12 +331,55 @@ class AvitoBrowser:
             else time.time() + config.CAPTCHA_MAX_WAIT_SEC
         )
         try:
+            # Out of band check counter to throttle probe_clear hits
+            oob_counter = 0
             while deadline is None or time.time() < deadline:
-                await asyncio.sleep(config.CAPTCHA_RECHECK_SEC)
-                if await self._probe_clear():
+                await asyncio.sleep(3)
+                
+                # 1. Quick check: did the human solve it? Only inspect the
+                # pages that are ACTUALLY blocked right now (they show the
+                # captcha and turn into listings only after a real solve).
+                # Scanning every tab gave false positives: other pooled tabs
+                # still display stale results from the previous cycle, so the
+                # gate "cleared" itself instantly the moment a captcha popped.
+                solved_on_page = False
+                for p in list(self._blocked_pages):
+                    try:
+                        if p.is_closed() or p.url == "about:blank":
+                            continue
+                        p_html = await p.content()
+                        if has_listings(p_html) or "item-view/item-description" in p_html:
+                            log.info("Browser: detected captcha solve on blocked page: %s", p.url)
+                            solved_on_page = True
+                            break
+                    except Exception:
+                        continue
+
+                # 2. Slow fallback check: run the out of band probe once every 12 seconds
+                oob_solved = False
+                oob_counter += 3
+                if not solved_on_page and oob_counter >= 12:
+                    oob_counter = 0
+                    oob_solved = await self._probe_clear()
+
+                if solved_on_page or oob_solved:
                     if notified and self.notifier:
                         with contextlib.suppress(Exception):
                             await self.notifier.captcha_cleared()
+                    
+                    # 3. Reload ALL pages currently stuck on a captcha or Datadome screen
+                    if self._ctx:
+                        for p in list(self._ctx.pages):
+                            try:
+                                if p.is_closed() or p.url == "about:blank":
+                                    continue
+                                p_html = await p.content()
+                                if page_blocked(p_html) or "datadome" in p.url or "captcha" in p.url:
+                                    log.info("Browser: auto-refreshing blocked page: %s", p.url)
+                                    asyncio.create_task(self._reload_safe(p))
+                            except Exception as re:
+                                log.debug("Browser: auto-refresh page failed: %s", re)
+                                
                     return True
             log.warning("Captcha not solved within %ss, will retry later.",
                         config.CAPTCHA_MAX_WAIT_SEC)
@@ -260,24 +391,28 @@ class AvitoBrowser:
         """Called by any tab that hit a block. Exactly one coroutine becomes
         the handler (notifies + waits); the others just wait, then every tab
         reloads itself so work resumes without manual page refresh."""
-        am_first = False
-        async with self._captcha_lock:
-            if self._unblocked.is_set():
-                self._unblocked.clear()
-                am_first = True
-        if am_first:
-            try:
-                ok = await self._run_captcha_wait(url)
-            finally:
-                self._unblocked.set()  # release all waiters
-            if not ok:
-                return False
-        else:
-            await self._unblocked.wait()
-            # Stagger so the pool does not reload all tabs at once.
-            await asyncio.sleep(random.uniform(0.5, 2.5))
-        await self._reload(page)
-        return True
+        self._blocked_pages.add(page)
+        try:
+            am_first = False
+            async with self._captcha_lock:
+                if self._unblocked.is_set():
+                    self._unblocked.clear()
+                    am_first = True
+            if am_first:
+                try:
+                    ok = await self._run_captcha_wait(url)
+                finally:
+                    self._unblocked.set()  # release all waiters
+                if not ok:
+                    return False
+            else:
+                await self._unblocked.wait()
+                # Stagger so the pool does not reload all tabs at once.
+                await asyncio.sleep(random.uniform(0.5, 2.5))
+            await self._reload(page)
+            return True
+        finally:
+            self._blocked_pages.discard(page)
 
     # ─── search ─────────────────────────────────────────────────────────────
 
@@ -289,12 +424,14 @@ class AvitoBrowser:
         min_price: int | None = None,
         max_price: int | None = None,
         pages: int = 1,
+        start_page: int = 1,
+        mode: str = "fast",
     ) -> list[ParsedListing]:
         pages = max(1, pages)
-        async with self.acquire_page() as page:
+        async with self.acquire_page(mode=mode) as page:
             out: list[ParsedListing] = []
             seen: set[str] = set()
-            for page_num in range(1, pages + 1):
+            for page_num in range(start_page, start_page + pages):
                 items = await self._fetch_page(
                     page, query, city_slug, min_price, max_price, page_num
                 )
@@ -309,7 +446,7 @@ class AvitoBrowser:
                     new += 1
                 if new == 0:
                     break
-                if page_num < pages:
+                if page_num < start_page + pages - 1:
                     await asyncio.sleep(random.uniform(*config.PAGE_TURN_DELAY_SEC))
             return out
 
@@ -354,8 +491,8 @@ class AvitoBrowser:
                 return parse_listings(new_html) if has_listings(new_html) else []
         return []
 
-    async def fetch_details(self, item: ParsedListing) -> ParsedListing:
-        async with self.acquire_page() as page:
+    async def fetch_details(self, item: ParsedListing, mode: str = "fast") -> ParsedListing:
+        async with self.acquire_page(mode=mode) as page:
             try:
                 await page.goto(item.full_url, wait_until="domcontentloaded",
                                 timeout=config.NAV_TIMEOUT_MS)
