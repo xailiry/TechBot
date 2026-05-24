@@ -13,6 +13,7 @@ from techhunter.storage import (
     cache_listing,
     cache_listing_skipped,
     get_cached_listing,
+    list_pending_alerts,
     mark_alert_sent,
     record_feedback,
 )
@@ -130,6 +131,23 @@ async def test_delivery_failure_not_marked_sent() -> None:
     check("delivery failure counted", counters["errors"] == 1)
     check("delivery failure not marked sent",
           not await alert_already_sent(tg, lid))
+    pending = await list_pending_alerts()
+    check("delivery failure queued",
+          any(p["tg_id"] == tg and p["listing_id"] == lid for p in pending))
+
+    class RecoveringNotifier:
+        async def deal(self, item, report, valuation, *, tg_id=None, sub_query=None):
+            await mark_alert_sent(
+                tg_id, item.id, price=item.price,
+                profit=valuation.net_profit, verdict=valuation.scam_verdict,
+                condition=valuation.condition, sub_query=sub_query,
+            )
+
+    await monitor._retry_pending_alerts(RecoveringNotifier())  # type: ignore
+    check("queued delivery retried", await alert_already_sent(tg, lid))
+    pending_after = await list_pending_alerts()
+    check("queued delivery removed",
+          not any(p["tg_id"] == tg and p["listing_id"] == lid for p in pending_after))
 
 
 async def test_feedback_threshold_filters_noisy_user() -> None:

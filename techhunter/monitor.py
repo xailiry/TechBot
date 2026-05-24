@@ -28,8 +28,12 @@ from .storage import (
     get_cached_listing,
     get_delivery_prefs,
     feedback_threshold_multiplier,
+    delete_pending_alert,
+    list_pending_alerts,
     mark_alert_sent,
+    mark_pending_alert_attempt,
     mark_subscription_onboarded,
+    queue_pending_alert,
     check_content_duplicate,
 )
 from .valuation.engine import Valuation
@@ -200,6 +204,10 @@ async def _handle_items(browser, items, target, notifier, sem, cycle_eval, count
             min_rub = target.discovery_min_profit_rub or config.DISCOVERY_MIN_PROFIT_RUB
             min_ratio = target.discovery_min_profit_ratio or config.DISCOVERY_MIN_PROFIT_RATIO
             if valuation.net_profit < min_rub or (valuation.net_profit / it.price) < min_ratio:
+                counters["filtered"] += 1
+                runtime_drop["discovery_threshold"] = (
+                    runtime_drop.get("discovery_threshold", 0) + 1
+                )
                 return
 
         if feedback_mult != 1.0:
@@ -232,6 +240,15 @@ async def _handle_items(browser, items, target, notifier, sem, cycle_eval, count
             )
         except Exception as e:
             counters["errors"] += 1
+            with contextlib.suppress(Exception):
+                await queue_pending_alert(
+                    tg_id,
+                    it,
+                    report,
+                    valuation,
+                    sub_query=sub_query,
+                    error=str(e),
+                )
             log.warning("Deal delivery failed for %s to %s: %s", it.id, tg_id, e)
             return
 
@@ -338,6 +355,52 @@ async def poll_deep(browser, notifier: Notifier) -> None:
             await _handle_items(browser, items, u, notifier, eval_sem, cycle_eval, counters, runtime_drop, mode="deep", deep_budget=deep_budget)
     except Exception as e:
         log.warning("Deep discovery failed: %s", e)
+
+
+async def _retry_pending_alerts(notifier: Notifier) -> int:
+    from .scraper.models import ParsedListing
+
+    sent = 0
+    rows = await list_pending_alerts(config.DELIVERY_RETRY_BATCH_SIZE)
+    for row in rows:
+        tg_id = row["tg_id"]
+        listing_id = row["listing_id"]
+        if await alert_already_sent(tg_id, listing_id):
+            await delete_pending_alert(tg_id, listing_id)
+            continue
+        try:
+            item = ParsedListing(**row["item"])
+            report = EvaluationReport(**row["report"])
+            valuation = Valuation(**row["valuation"])
+            await notifier.deal(
+                item,
+                report,
+                valuation,
+                tg_id=tg_id,
+                sub_query=row.get("sub_query"),
+            )
+        except Exception as e:
+            await mark_pending_alert_attempt(tg_id, listing_id, str(e))
+            log.warning(
+                "Pending deal delivery failed for %s to %s: %s",
+                listing_id, tg_id, e,
+            )
+            continue
+        await delete_pending_alert(tg_id, listing_id)
+        sent += 1
+    if sent:
+        log.info("Pending deal delivery retried successfully: %d", sent)
+    return sent
+
+
+async def _delivery_retry_loop(notifier: Notifier) -> None:
+    interval = max(10, config.DELIVERY_RETRY_INTERVAL_SEC)
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            await _retry_pending_alerts(notifier)
+        except Exception as e:
+            log.debug("Pending deal retry tick failed: %s", e)
 
 
 async def _watchdog_loop(notifier: Notifier) -> None:
@@ -548,6 +611,7 @@ async def run_forever(notifier: Notifier | None = None) -> None:
         asyncio.create_task(_watchdog_loop(notifier)),
         asyncio.create_task(_maintenance_loop()),
         asyncio.create_task(_browser_refresh_loop(browser)),
+        asyncio.create_task(_delivery_retry_loop(notifier)),
         asyncio.create_task(fast_loop()),
         asyncio.create_task(deep_loop()),
         asyncio.create_task(training_loop()),

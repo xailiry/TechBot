@@ -16,6 +16,7 @@ from .db.models import (
     DealFeedback,
     ImageHash,
     Listing,
+    PendingAlert,
     PriceObservation,
     SentAlert,
     Subscription,
@@ -297,6 +298,8 @@ async def cleanup_old_rows() -> dict[str, int]:
         (CardState, CardState.created_at,
          config.CARD_STATE_RETENTION_DAYS),
         (SentAlert, SentAlert.sent_at, config.SENT_ALERT_RETENTION_DAYS),
+        (PendingAlert, PendingAlert.created_at,
+         config.PENDING_ALERT_RETENTION_DAYS),
     ]
     out: dict[str, int] = {}
     async with get_session() as s:
@@ -565,3 +568,94 @@ async def mark_alert_sent(
             )
         )
         await s.execute(stmt)
+
+
+async def queue_pending_alert(
+    tg_id: int,
+    item: ParsedListing,
+    report,
+    valuation,
+    *,
+    sub_query: str | None = None,
+    error: str | None = None,
+) -> None:
+    """Persist a deal card for later delivery when Telegram is reachable."""
+    async with get_session() as s:
+        stmt = (
+            sqlite_insert(PendingAlert)
+            .values(
+                tg_id=tg_id,
+                listing_id=item.id,
+                item_json=json.dumps(item.model_dump(), ensure_ascii=False),
+                report_json=json.dumps(report.model_dump(), ensure_ascii=False),
+                valuation_json=json.dumps(
+                    valuation.model_dump(), ensure_ascii=False
+                ),
+                sub_query=sub_query,
+                last_error=error,
+            )
+            .on_conflict_do_update(
+                index_elements=[PendingAlert.tg_id, PendingAlert.listing_id],
+                set_={
+                    "item_json": json.dumps(
+                        item.model_dump(), ensure_ascii=False
+                    ),
+                    "report_json": json.dumps(
+                        report.model_dump(), ensure_ascii=False
+                    ),
+                    "valuation_json": json.dumps(
+                        valuation.model_dump(), ensure_ascii=False
+                    ),
+                    "sub_query": sub_query,
+                    "last_error": error,
+                },
+            )
+        )
+        await s.execute(stmt)
+
+
+async def list_pending_alerts(limit: int = 10) -> list[dict]:
+    async with get_session() as s:
+        rows = await s.execute(
+            select(PendingAlert)
+            .order_by(PendingAlert.created_at)
+            .limit(limit)
+        )
+        out = []
+        for row in rows.scalars().all():
+            out.append(
+                {
+                    "tg_id": row.tg_id,
+                    "listing_id": row.listing_id,
+                    "item": json.loads(row.item_json),
+                    "report": json.loads(row.report_json),
+                    "valuation": json.loads(row.valuation_json),
+                    "sub_query": row.sub_query,
+                    "attempts": row.attempts,
+                    "last_error": row.last_error,
+                    "created_at": row.created_at,
+                }
+            )
+        return out
+
+
+async def mark_pending_alert_attempt(
+    tg_id: int, listing_id: str, error: str | None = None
+) -> None:
+    async with get_session() as s:
+        row = await s.get(PendingAlert, (tg_id, listing_id))
+        if row is None:
+            return
+        row.attempts = (row.attempts or 0) + 1
+        row.last_attempt_at = datetime.now(timezone.utc)
+        row.last_error = error
+
+
+async def delete_pending_alert(tg_id: int, listing_id: str) -> None:
+    async with get_session() as s:
+        await s.execute(
+            delete(PendingAlert).where(
+                PendingAlert.tg_id == tg_id,
+                PendingAlert.listing_id == listing_id,
+            )
+        )
