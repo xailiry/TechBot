@@ -21,7 +21,7 @@ from techhunter.valuation.devices import (
     get_or_create_device,
     set_manual_baseline,
 )
-from techhunter.valuation.engine import fast_value_listing
+from techhunter.valuation.engine import fast_value_listing, learn_from_card
 
 
 def check(name: str, cond: bool) -> None:
@@ -142,6 +142,20 @@ async def test_learn_uses_card_not_detail() -> None:
     check("learning counted", counters.get("learning") == 1)
     prices = await _prices(dev_id, ("ideal", "good"))
     check("card observation logged", 22000 in prices)
+
+
+async def test_extreme_avito_badges_do_not_teach_baseline() -> None:
+    from techhunter.valuation.devices import _prices  # noqa: PLC2701
+
+    title = "Honor 90 256GB"
+    dev_id = await _resolve_device(title)
+    item = _item("d7-below", title, 18000)
+    item.avito_price_badge = "below"
+    item.avito_market_badge = True
+
+    learned = await learn_from_card(item)
+    prices = await _prices(dev_id, ("ideal", "good"))
+    check("below-market badge not learned", learned is False and 18000 not in prices)
 
 
 async def test_fresh_iphone_learning_opens_detail() -> None:
@@ -446,6 +460,7 @@ def main() -> None:
     asyncio.run(test_verdict_deal_vs_skip_with_baseline())
     asyncio.run(test_iphone_16e_does_not_use_iphone_16_baseline())
     asyncio.run(test_learn_uses_card_not_detail())
+    asyncio.run(test_extreme_avito_badges_do_not_teach_baseline())
     asyncio.run(test_fresh_iphone_learning_opens_detail())
     asyncio.run(test_storage_missing_opens_detail_for_learning())
     asyncio.run(test_deal_budget_defers())

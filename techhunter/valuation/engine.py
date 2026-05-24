@@ -58,6 +58,15 @@ def requires_detail_learning(brand: str, model: str | None) -> bool:
     return gen is not None and gen >= config.DETAIL_LEARN_APPLE_MIN_GENERATION
 
 
+def _is_price_badge_teaching_safe(item: "ParsedListing") -> bool:
+    """Only neutral Avito market badges should feed the baseline.
+
+    "Below market" and "above market" are useful deal signals, but they are
+    explicitly not the typical resale price we want to learn.
+    """
+    return getattr(item, "avito_price_badge", None) not in {"below", "above"}
+
+
 class Valuation(BaseModel):
     listing_id: str
     device_key: str | None = None
@@ -165,6 +174,8 @@ async def learn_from_card(item: "ParsedListing", source: str = "card") -> bool:
         return False
     if specs.is_new:
         return False  # never learn the used market from sealed/new lots
+    if not _is_price_badge_teaching_safe(item):
+        return False
     # Only title-level shop signals are visible before the detail page; enough
     # to drop the obvious resellers from the learned median.
     if looks_shoplike(
@@ -217,6 +228,7 @@ async def value_listing(
             log_obs
             and not report.is_new
             and not v.shoplike
+            and _is_price_badge_teaching_safe(item)
         ):
             await log_observation(
                 device_id,

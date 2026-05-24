@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from .. import config
 # Re-exported for back-compat; logic lives in the shared textnorm module.
 from ..textnorm import homoglyph_ratio, normalize_homoglyphs  # noqa: F401
 
@@ -205,7 +206,10 @@ def score_listing(
         elif avito_price_badge == "above":
             score -= 12
             cons.append("Авито: цена выше рыночной")
-        elif avito_price_badge == "market" and ratio <= 0.70:
+        elif (
+            avito_price_badge == "market"
+            and ratio <= config.AVITO_MARKET_BADGE_CONFLICT_RATIO
+        ):
             score -= 14
             cons.append(
                 "Авито считает цену рыночной — проверь заявленное состояние"

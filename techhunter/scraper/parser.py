@@ -94,6 +94,9 @@ def _parse_card(card: Tag) -> ParsedListing | None:
         date_el = card.find(attrs={"data-marker": "item-date"})
         date_text = date_el.get_text(strip=True) if date_el else ""
 
+        snippet = card.get_text(" ", strip=True)
+        badge = _parse_avito_price_badge(snippet)
+
         return ParsedListing(
             id=str(item_id),
             title=title,
@@ -103,7 +106,9 @@ def _parse_card(card: Tag) -> ParsedListing | None:
             location=location,
             date_text=date_text,
             image=image,
-            snippet=card.get_text(" ", strip=True),
+            snippet=snippet,
+            avito_price_badge=badge,
+            avito_market_badge=badge is not None,
         )
     except Exception as e:  # one bad card must not kill the page
         log.debug("parse_card failed: %s", e)

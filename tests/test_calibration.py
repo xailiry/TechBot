@@ -127,6 +127,20 @@ async def case_avito_market_badge_conflict() -> None:
     check("Badge conflict missing reason",
           "avito_market_badge_conflict" in val.missing)
 
+    await _seed_baseline("apple", "iPhone 13 Pro Max", 512, 48500)
+    it_74 = _item(
+        "iPhone 13 Pro Max, 512 GB",
+        "Good condition, battery health 85%, everything works.",
+        36000,
+        params={"встроенная память": "512 ГБ"},
+        avito_market_badge=True,
+        avito_price_badge="market",
+    )
+    rep_74 = await evaluate_listing(it_74, run_clip=False, do_dedup=False)
+    val_74 = await value_listing(it_74, rep_74, log_obs=False)
+    check("Badge conflict suppresses 74 percent market",
+          val_74.opportunity is False)
+
 
 async def case_replica_fake() -> None:
     it = _item(

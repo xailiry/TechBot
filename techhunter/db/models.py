@@ -144,6 +144,11 @@ class PriceObservation(Base):
     __tablename__ = "price_observations"
     __table_args__ = (
         Index("ix_priceobs_device_cond", "device_id", "condition"),
+        Index(
+            "ux_priceobs_source_listing_device_condition_price",
+            "source", "listing_id", "device_id", "condition", "price",
+            unique=True,
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)

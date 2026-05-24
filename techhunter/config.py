@@ -159,7 +159,7 @@ DETAIL_LEARN_APPLE_MIN_GENERATION = int(
 # far below market, treat it as a condition-mismatch warning. Usually the
 # seller declared a defect that our text parser may have missed.
 AVITO_MARKET_BADGE_CONFLICT_RATIO = float(
-    os.getenv("AVITO_MARKET_BADGE_CONFLICT_RATIO", "0.70")
+    os.getenv("AVITO_MARKET_BADGE_CONFLICT_RATIO", "0.85")
 )
 
 # ─── Discovery Mode (Broad Category Scan) ───────────────────────────────────

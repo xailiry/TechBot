@@ -21,6 +21,7 @@ SEARCH_HTML = """
   <a data-marker="item-title" href="/moskva/telefony/iphone_13_128_2222">iPhone 13 128GB</a>
   <span data-marker="item-price-value">45 000 ₽</span>
   <span data-marker="item-address">Москва, м. Тверская</span>
+  <span>Цена ниже рыночной</span>
   <img data-marker="item-photo" src="//img.avito.st/image/1/abc.jpg">
 </div>
 <div data-marker="item" data-item-id="222">
@@ -78,6 +79,7 @@ def test_search_parse() -> None:
     check("price", a.price == 45000)
     check("location", "Москва" in a.location)
     check("image abs", a.image == "https://img.avito.st/image/1/abc.jpg")
+    check("card price badge below", a.avito_price_badge == "below")
     check("full_url", a.full_url.startswith("https://www.avito.ru/moskva/"))
     check("price 'от 60 000'", items[1].price == 60000)
 
