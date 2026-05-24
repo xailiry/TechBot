@@ -19,6 +19,7 @@ CONDITION_RU = {
 
 DEFECT_RU = {
     "screen_cracked": "разбит экран",
+    "screen_display_defect": "дефект дисплея",
     "back_glass_cracked": "разбита задняя крышка",
     "screen_replaced": "неоригинальный экран",
     "battery_replaced": "АКБ под замену",
@@ -48,6 +49,7 @@ MISSING_RU = {
     "condition_unknown": "состояние не определено",
     "for_parts": "лот на запчасти",
     "flip_blocked": "дефект мешает перепродаже (напр. Face ID)",
+    "avito_market_badge_conflict": "Авито считает цену рыночной для заявленного состояния",
 }
 
 VISUAL_RU = {
@@ -145,6 +147,8 @@ def format_deal_card(item, report, valuation, sub_query: str = "") -> str:
         }.get(valuation.baseline_confidence)
         if conf:
             lines.append(f"{conf} (выборка {valuation.baseline_sample})")
+    if getattr(item, "avito_market_badge", False):
+        lines.append("🏷 Авито: рыночная цена по заявленному состоянию")
 
     # 4. Seller.
     if item.seller_name:

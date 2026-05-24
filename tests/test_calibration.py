@@ -82,6 +82,51 @@ async def case_broken_flip() -> None:
           not any("от рынка" in c for c in val.cons))
 
 
+async def case_display_stripe_not_working_deal() -> None:
+    """Real Avito bug: display stripes/dead pixels + "рыночная цена" badge
+    must not be delivered as a clean ideal/working arbitrage."""
+    await _seed_baseline("apple", "iPhone 12 Pro", 128, 18000)
+    it = _item(
+        "iPhone 12 Pro, 128 ГБ",
+        "Аккумулятор заменили на новый, корпус и экран в идеале, "
+        "но есть полоса, от этого и такая цена.",
+        12000,
+        params={
+            "состояние": "Удовлетворительное",
+            "экран": "Полосы и битые пиксели",
+            "корпус": "Без дефектов",
+            "состояние аккумулятора": "100 %",
+            "встроенная память": "128 ГБ",
+        },
+        avito_market_badge=True,
+    )
+    rep = await evaluate_listing(it, run_clip=False, do_dedup=False)
+    val = await value_listing(it, rep, log_obs=False)
+    check("Stripe display defect", "screen_display_defect" in rep.defects)
+    check("Stripe condition broken", rep.condition == "broken")
+    check("Stripe repair is screen", val.repair_breakdown.get("screen") is not None)
+    check("Stripe not opportunity", val.opportunity is False)
+
+
+async def case_avito_market_badge_conflict() -> None:
+    """If our text parser sees a clean working lot, but Avito says the very
+    low price is still market, suppress the working-deal false positive."""
+    await _seed_baseline("apple", "iPhone 12 Pro", 128, 18000)
+    it = _item(
+        "iPhone 12 Pro, 128 ГБ",
+        "Идеал, акб 100%, всё работает.",
+        12000,
+        params={"встроенная память": "128 ГБ"},
+        avito_market_badge=True,
+    )
+    rep = await evaluate_listing(it, run_clip=False, do_dedup=False)
+    val = await value_listing(it, rep, log_obs=False)
+    check("Badge conflict starts working", rep.condition == "ideal")
+    check("Badge conflict suppresses opportunity", val.opportunity is False)
+    check("Badge conflict missing reason",
+          "avito_market_badge_conflict" in val.missing)
+
+
 async def case_replica_fake() -> None:
     it = _item(
         "iPhone 14 Pro Max 256",
@@ -312,6 +357,8 @@ async def _main() -> None:
     await case_cosmetic_only_no_overvalue()
     await case_homoglyph_screen_replaced()
     await case_broken_flip()
+    await case_display_stripe_not_working_deal()
+    await case_avito_market_badge_conflict()
     await case_replica_fake()
     await case_icloud_for_parts()
     await case_low_battery_defect()

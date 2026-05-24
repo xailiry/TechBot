@@ -96,6 +96,20 @@ def test_specs() -> None:
     check("fallback ram 12", s7.ram_gb == 12)
     check("fallback storage 512", s7.storage_gb == 512)
 
+    s8 = extract_specs(
+        "iPhone 12 Pro 128 ГБ",
+        "Корпус и экран в идеале, но есть полоса",
+        {"экран": "Полосы и битые пиксели", "состояние": "Удовлетворительное"},
+    )
+    check("screen stripes -> display defect",
+          "screen_display_defect" in s8.defects)
+
+    s9 = extract_specs(
+        "iPhone 12 Pro 128 ГБ",
+        "экран без полос и битых пикселей",
+    )
+    check("no false stripes", "screen_display_defect" not in s9.defects)
+
 
 def test_normalize() -> None:
     d = normalize_device("Айфон 13 про макс 256гб", storage_gb=256)
@@ -136,6 +150,11 @@ def test_condition() -> None:
           cond("iPhone 12 на запчасти icloud") == Condition.FOR_PARTS)
     check("faceid -> DEFECT",
           cond("iPhone 11 Face ID не работает") == Condition.DEFECT)
+    check("display stripes -> BROKEN",
+          cond("iPhone 12 Pro", "экран полосит") == Condition.BROKEN)
+    check("declared satisfactory -> DEFECT",
+          cond("iPhone 12 Pro", "состояние удовлетворительное")
+          == Condition.DEFECT)
     check("ideal -> IDEAL", cond("iPhone 14 идеал") == Condition.IDEAL)
     check("plain -> GOOD", cond("iPhone 12 128 б/у") == Condition.GOOD)
 

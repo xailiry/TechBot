@@ -149,6 +149,12 @@ MIN_PROFIT_RATIO = float(os.getenv("MIN_PROFIT_RATIO", "0.12"))
 # If item.price < (market * (1 - HAGGLE) * threshold), trigger Stage 2.
 # 0.90 = we deep-evaluate if it looks like at least a 10% "pre-profit".
 FAST_VALUATION_THRESHOLD_PCT = float(os.getenv("FAST_VALUATION_THRESHOLD_PCT", "0.90"))
+# If Avito itself shows "market price" while our model thinks a working lot is
+# far below market, treat it as a condition-mismatch warning. Usually the
+# seller declared a defect that our text parser may have missed.
+AVITO_MARKET_BADGE_CONFLICT_RATIO = float(
+    os.getenv("AVITO_MARKET_BADGE_CONFLICT_RATIO", "0.70")
+)
 
 # ─── Discovery Mode (Broad Category Scan) ───────────────────────────────────
 # Polling the whole category for any deal that matches these thresholds.

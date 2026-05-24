@@ -225,6 +225,7 @@ async def value_listing(
         reused_image_count=report.reused_image_count,
         visual=report.visual,
         defects=report.defects,
+        avito_market_badge=getattr(item, "avito_market_badge", False),
     )
     v.scam_score = scam.score
     v.scam_verdict = scam.verdict
@@ -245,6 +246,13 @@ async def value_listing(
 
     overhead = config.PROFIT_OVERHEAD_RUB
     cond = report.condition
+    market_badge_conflict = (
+        bool(getattr(item, "avito_market_badge", False))
+        and cond in _WORKING
+        and item.price > 0
+        and baseline > 0
+        and (item.price / baseline) <= config.AVITO_MARKET_BADGE_CONFLICT_RATIO
+    )
 
     if cond in _WORKING:
         if v.gross_profit is not None:
@@ -286,6 +294,9 @@ async def value_listing(
             and v.profit_pct >= config.MIN_PROFIT_RATIO
             and scam.verdict != "fake"
         )
+        if v.opportunity and market_badge_conflict:
+            v.opportunity = False
+            missing.append("avito_market_badge_conflict")
 
 
     v.missing = missing

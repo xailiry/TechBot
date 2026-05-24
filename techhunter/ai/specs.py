@@ -15,6 +15,7 @@ Defect codes:
   not_original_parts  refurbished / restored / non-original components
   replica             counterfeit / 1:1 copy
   no_power            does not turn on / no image / dead
+  screen_display_defect display matrix issue: stripes / dead pixels / flicker
   cosmetic_wear       scratches / dents / chips, declared "with nuances"
 """
 import re
@@ -78,6 +79,13 @@ _DEFECT_PATTERNS: list[tuple[str, str]] = [
     (r"разби\w*\s*экран|разби\w*\s*диспл\w*|треснут\w*\s*экран|трещин\w*\s*на\s*экран|"
      r"би[тл]\w*\s*экран|разбит\s*перед|треснут\w*\s*стекл\w*\s*спереди|broken screen|"
      r"cracked screen", "screen_cracked"),
+    (r"(?:экран|диспл\w*|матриц\w*)[^.\n]{0,60}(?:полос\w*|бит\w*\s*пиксел\w*|пиксел\w*\s*бит\w*|мерца\w*|морга\w*|"
+     r"зелен[а-я]*\s+экран|бел[а-я]*\s+экран|засвет\w*)|"
+     r"(?:полос\w*|бит\w*\s*пиксел\w*|пиксел\w*\s*бит\w*|мерца\w*|морга\w*)[^.\n]{0,60}(?:экран|диспл\w*|матриц\w*)|"
+     r"(?:есть|имеетс[яь]|появил\w*|появля\w*)[^.\n]{0,25}полос[аы]\b|"
+     r"\b(?:битые|битый|мертвые|мёртвые|dead)\s+пиксел\w*\b|"
+     r"\b(?:экран|диспл\w*)\s+полосит\b",
+     "screen_display_defect"),
     (r"разби\w*\s*(?:зад|крышк|корпус)|треснут\w*\s*(?:зад|крышк)|"
      r"стекл\w*\s*сзади\s*(?:разб|трес)|би[тл]\w*\s*крышк", "back_glass_cracked"),
     (r"замен\w*\s*(?:экран\w*|диспл\w*|модул\w*)|неоригинал\w*\s*(?:экран\w*|диспл\w*)|"
@@ -111,6 +119,9 @@ _NEG_CLEAN = re.compile(
     r"|\bбез\s+(?:r[\s\-]?sim|р[\s\-]?сим|mdm|мдм|сим[\s\-]?лок|sim[\s\-]?lock|чип\w*|обход\w*)\b"
     r"|\bне\s+(?:залочен\w*|заблокирован\w*)"
     r"|\b(?:нет|без|никаких)\s+проблем\w*"
+    r"|\b(?:нет|без|никаких)\s+(?:полос\w*|бит\w*\s*пиксел\w*)"
+    r"(?:\s*(?:и|,)\s*(?:полос\w*|бит\w*\s*пиксел\w*))*"
+    r"|\b(?:полос\w*|бит\w*\s*пиксел\w*)\s+нет\b"
     r"|\bneverlock\b|\bневерлок\b",
     re.I,
 )

@@ -121,6 +121,7 @@ def score_listing(
     reused_image_count: int = 0,
     visual: dict | None = None,
     defects: list[str] | None = None,
+    avito_market_badge: bool = False,
 ) -> ScamScore:
     full = normalize_homoglyphs(f"{title} {description}")
     pros: list[str] = []
@@ -180,6 +181,11 @@ def score_listing(
         elif 0.40 <= ratio <= 0.85:
             score += 14
             pros.append(f"цена {ratio*100:.0f}% от рынка — хороший арбитраж")
+        if avito_market_badge and ratio <= 0.70:
+            score -= 14
+            cons.append(
+                "Авито считает цену рыночной — проверь заявленное состояние"
+            )
 
     if reused_image_count > 0:
         pen = min(40, reused_image_count * 15)

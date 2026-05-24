@@ -6,11 +6,21 @@ from enum import Enum
 from .specs import DeviceSpecs
 
 _SEALED_KEYWORDS = ("идеал", "как новый", "новый", "запечатан", "не вскрыт")
+_DECLARED_DEFECT_KEYWORDS = (
+    "удовлетворительное",
+    "состояние удовлетвор",
+    "с дефект",
+    "есть дефект",
+    "имеются дефект",
+)
 
 # A FOR_PARTS device cannot be resold as working without major work.
 _FOR_PARTS = {"icloud_locked", "carrier_locked"}
-# A BROKEN device is intact-but-cracked: the key "cheap broken lot" signal.
-_BROKEN = {"screen_cracked", "back_glass_cracked", "no_power"}
+# A BROKEN device is intact-but-cracked/display-damaged: the key "cheap
+# broken lot" signal.
+_BROKEN = {
+    "screen_cracked", "screen_display_defect", "back_glass_cracked", "no_power",
+}
 _DEFECT = {
     "screen_replaced", "battery_replaced", "faceid_broken",
     "truetone_missing", "not_original_parts", "replica", "cosmetic_wear",
@@ -37,6 +47,8 @@ def grade_condition(specs: DeviceSpecs, text: str = "") -> Condition:
         return Condition.DEFECT
 
     low = text.lower()
+    if any(k in low for k in _DECLARED_DEFECT_KEYWORDS):
+        return Condition.DEFECT
     if specs.is_sealed or any(k in low for k in _SEALED_KEYWORDS):
         # "идеал" with no detected defects -> top condition.
         return Condition.IDEAL

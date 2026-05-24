@@ -49,7 +49,8 @@ async def evaluate_listing(
     run_clip: bool = True,
     do_dedup: bool = True,
 ) -> EvaluationReport:
-    text = f"{item.title} {item.description}"
+    param_text = " ".join(f"{k} {v}" for k, v in item.params.items())
+    text = f"{item.title} {item.description} {param_text}"
     specs = extract_specs(item.title, item.description, item.params)
     device = normalize_device(
         item.title,

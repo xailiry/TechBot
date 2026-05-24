@@ -17,6 +17,10 @@ _REVIEWS_RE = re.compile(r"(\d+)\s*отзыв", re.I)
 _LISTINGS_RE = re.compile(r"(\d+)\s*объявлен", re.I)
 _YEAR_RE = re.compile(r"с\s*(\d{4})\s*года", re.I)
 _RATING_RE = re.compile(r"\b([1-5][.,]\d)\b")
+_AVITO_MARKET_BADGE_RE = re.compile(
+    r"рыночная\s+цена|независимая\s+оценка\s+авито",
+    re.I,
+)
 
 
 def _parse_price(text: str) -> int:
@@ -141,6 +145,8 @@ def parse_detail(html: str, item: ParsedListing) -> ParsedListing:
         item.description = desc_el.get_text(" ", strip=True)
 
     item.images = parse_gallery(soup)
+    page_text = soup.get_text(" ", strip=True)
+    item.avito_market_badge = bool(_AVITO_MARKET_BADGE_RE.search(page_text))
 
     params_el = soup.find(attrs={"data-marker": "item-view/item-params"})
     if params_el:

@@ -16,6 +16,7 @@ log = logging.getLogger(__name__)
 # Defect code -> physical repair type priced to flip the lot to "working".
 REPAIRABLE: dict[str, str] = {
     "screen_cracked": "screen",
+    "screen_display_defect": "screen",
     "back_glass_cracked": "back_glass",
     "battery_replaced": "battery",
     "faceid_broken": "faceid",
