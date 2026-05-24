@@ -150,11 +150,11 @@ async def _evaluate(browser, item, sem, cycle_eval, counters, mode: str = "fast"
                 # Card-only learning: log the price from the search card
                 # without opening the listing. Calm (no navigation) and fast
                 # (every card contributes), so baselines grow quickly.
-                await learn_from_card(item)
-                await cache_listing_skipped(item)
-                cycle_eval[item.id] = (None, None)
-                counters["learning"] = counters.get("learning", 0) + 1
-                return None, None
+                if await learn_from_card(item):
+                    await cache_listing_skipped(item)
+                    cycle_eval[item.id] = (None, None)
+                    counters["learning"] = counters.get("learning", 0) + 1
+                    return None, None
             # "deal" (or a subscription "learn"): bounded deep evaluation.
             if is_discovery and deep_budget is not None:
                 if deep_budget.get("n", 0) <= 0:

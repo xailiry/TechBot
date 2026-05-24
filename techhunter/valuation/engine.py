@@ -90,6 +90,8 @@ async def fast_value_listing(
     )
     if not norm.model:
         return "skip"  # could not even guess what it is
+    if norm.storage_gb is None:
+        return "learn"  # storage-specific pricing needs detail params
 
     device_id = await get_or_create_device(
         norm.brand, norm.model, norm.storage_gb, norm.ram_gb
@@ -123,6 +125,8 @@ async def learn_from_card(item: "ParsedListing", source: str = "avito") -> bool:
         item.title, storage_gb=specs.storage_gb, ram_gb=specs.ram_gb
     )
     if not norm.model:
+        return False
+    if norm.storage_gb is None:
         return False
     if specs.is_new:
         return False  # never learn the used market from sealed/new lots

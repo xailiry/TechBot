@@ -58,6 +58,15 @@ async def test_verdict_learn_without_baseline() -> None:
     check("no baseline + subscription -> learn", v2 == "learn")
 
 
+async def test_verdict_learn_without_storage() -> None:
+    title = "iPhone 14 Pro"
+    dev_id = await _resolve_device("iPhone 14 Pro 256GB")
+    await set_manual_baseline(dev_id, 70000)
+    v = await fast_value_listing(_item("d2c", title, 45000),
+                                 is_discovery=True)
+    check("no storage -> learn/detail", v == "learn")
+
+
 async def test_verdict_deal_vs_skip_with_baseline() -> None:
     title = "iPhone 13 Pro 128GB"
     dev_id = await _resolve_device(title)
@@ -104,6 +113,35 @@ async def test_learn_uses_card_not_detail() -> None:
     check("learning counted", counters.get("learning") == 1)
     prices = await _prices(dev_id, ("ideal", "good"))
     check("card observation logged", 22000 in prices)
+
+
+async def test_storage_missing_opens_detail_for_learning() -> None:
+    """If the search card has no storage, Discovery must not learn a
+    storage-less market. It spends deep budget and opens detail so structured
+    Avito params can provide memory/RAM."""
+    calls = {"n": 0}
+
+    async def _fake_process(browser, it, mode="fast"):
+        calls["n"] += 1
+        return None, None
+
+    orig = monitor.process_new_listing
+    monitor.process_new_listing = _fake_process  # type: ignore
+    try:
+        item = _item("d7b", "Samsung Galaxy S25 Ultra", 65000)
+        budget = {"n": 1}
+        counters = {"errors": 0, "processed": 0, "cached": 0}
+        await monitor._evaluate(
+            object(), item, asyncio.Semaphore(1), {}, counters,
+            mode="fast", is_discovery=True, deep_budget=budget,
+        )
+    finally:
+        monitor.process_new_listing = orig  # type: ignore
+
+    check("storage-missing detail opened", calls["n"] == 1)
+    check("storage-missing budget decremented", budget["n"] == 0)
+    check("storage-missing processed after detail",
+          counters["processed"] == 1)
 
 
 async def test_deal_budget_defers() -> None:
@@ -218,12 +256,16 @@ async def test_learned_devices_screen() -> None:
 
     d1 = await _resolve_device("iPhone 11 Pro 256GB")
     d2 = await _resolve_device("Honor 90 256GB")
+    d3 = await get_or_create_device("apple", "iPhone NULLMEM TEST", None)
     await set_manual_baseline(d1, 41000)
     await set_manual_baseline(d2, 19000)
+    await set_manual_baseline(d3, 50000)
 
     labels = [d["label"] for d in await learned_devices(limit=200)]
     check("iPhone in learned list", any("iPhone 11 Pro" in l for l in labels))
     check("Honor in learned list", any("Honor 90" in l for l in labels))
+    check("no-memory hidden from learned list",
+          not any("NULLMEM" in l for l in labels))
 
     text, _ = await screen_learned(0)
     check("learned screen header", "Что бот знает" in text)
@@ -250,8 +292,10 @@ async def test_blocked_phone_not_a_deal() -> None:
 def main() -> None:
     asyncio.run(test_verdict_skip_unrecognized())
     asyncio.run(test_verdict_learn_without_baseline())
+    asyncio.run(test_verdict_learn_without_storage())
     asyncio.run(test_verdict_deal_vs_skip_with_baseline())
     asyncio.run(test_learn_uses_card_not_detail())
+    asyncio.run(test_storage_missing_opens_detail_for_learning())
     asyncio.run(test_deal_budget_defers())
     asyncio.run(test_deal_budget_consumed())
     asyncio.run(test_screen_state_matches_button())

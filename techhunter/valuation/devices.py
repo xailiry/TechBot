@@ -332,7 +332,9 @@ async def count_working_baselines() -> int:
                 .where(
                     MarketBaseline.condition == WORKING_CONDITION,
                     MarketBaseline.sample_size >= config.BASELINE_MIN_SAMPLE,
+                    DeviceCatalog.storage_gb.is_not(None),
                 )
+                .join(DeviceCatalog, DeviceCatalog.id == MarketBaseline.device_id)
             )
         ).scalar() or 0
 
@@ -354,6 +356,7 @@ async def learned_devices(limit: int = 12, offset: int = 0) -> list[dict]:
                 .where(
                     MarketBaseline.condition == WORKING_CONDITION,
                     MarketBaseline.sample_size >= config.BASELINE_MIN_SAMPLE,
+                    DeviceCatalog.storage_gb.is_not(None),
                 )
                 .order_by(MarketBaseline.sample_size.desc())
                 .limit(limit)
@@ -388,6 +391,7 @@ async def learning_overview(limit: int = 8) -> dict:
                 .join(MarketBaseline,
                       MarketBaseline.device_id == DeviceCatalog.id)
                 .where(MarketBaseline.condition == WORKING_CONDITION)
+                .where(DeviceCatalog.storage_gb.is_not(None))
                 .order_by(MarketBaseline.sample_size.desc())
                 .limit(limit)
             )
