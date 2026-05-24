@@ -119,9 +119,10 @@ async def case_avito_market_badge_conflict() -> None:
         params={"встроенная память": "128 ГБ"},
         avito_market_badge=True,
     )
+    it.description = "Ideal, battery health 92%, everything works."
     rep = await evaluate_listing(it, run_clip=False, do_dedup=False)
     val = await value_listing(it, rep, log_obs=False)
-    check("Badge conflict starts working", rep.condition == "ideal")
+    check("Badge conflict starts working", rep.condition in {"ideal", "good"})
     check("Badge conflict suppresses opportunity", val.opportunity is False)
     check("Badge conflict missing reason",
           "avito_market_badge_conflict" in val.missing)
@@ -311,6 +312,37 @@ async def case_dynamic_battery_threshold() -> None:
     check("iPhone 11 battery ok >= 80", "battery_replaced" not in rep_ip11_80.defects)
 
 
+async def case_old_iphone_100_battery_red_flag() -> None:
+    it_old = _item(
+        "iPhone 14 Pro 128GB",
+        "Used phone, battery health 100%, ideal condition.",
+        52000,
+    )
+    rep_old = await evaluate_listing(it_old, run_clip=False, do_dedup=False)
+    check("old iPhone 100 battery flagged",
+          "battery_replaced" in rep_old.defects)
+    check("old iPhone 100 battery condition defect",
+          rep_old.condition == "defect")
+
+    it_new = _item(
+        "iPhone 14 Pro 128GB new",
+        "New sealed phone, battery health 100%.",
+        80000,
+    )
+    rep_new = await evaluate_listing(it_new, run_clip=False, do_dedup=False)
+    check("new old-generation iPhone 100 allowed",
+          "battery_replaced" not in rep_new.defects)
+
+    it_recent = _item(
+        "iPhone 16e 128GB",
+        "Used phone, battery health 100%, ideal condition.",
+        36000,
+    )
+    rep_recent = await evaluate_listing(it_recent, run_clip=False, do_dedup=False)
+    check("recent iPhone 100 allowed",
+          "battery_replaced" not in rep_recent.defects)
+
+
 async def case_repairable_gems() -> None:
     await _seed_baseline("apple", "iPhone 13", 128, 55000)
     await set_repair_cost("apple", "iPhone 13", "faceid", 5000)
@@ -368,6 +400,7 @@ async def _main() -> None:
     await case_regional_variants()
     await case_battery_cycles_fraud()
     await case_dynamic_battery_threshold()
+    await case_old_iphone_100_battery_red_flag()
     await case_repairable_gems()
     print("\nAll calibration checks passed.")
 

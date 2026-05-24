@@ -6,6 +6,7 @@ this report for valuation and the broken-lot opportunity logic.
 """
 import asyncio
 import logging
+import re
 
 from pydantic import BaseModel, Field
 
@@ -18,6 +19,18 @@ from .normalize import normalize_device
 from .specs import extract_specs
 
 log = logging.getLogger(__name__)
+
+_IPHONE_GENERATION_RE = re.compile(r"\biPhone\s+(\d{1,2})", re.I)
+
+
+def _is_recent_iphone_model(model: str | None) -> bool:
+    if not model:
+        return False
+    base = model.split("[", 1)[0].strip()
+    if base == "iPhone Air":
+        return True
+    m = _IPHONE_GENERATION_RE.search(base)
+    return bool(m and int(m.group(1)) >= 16)
 
 
 class EvaluationReport(BaseModel):
@@ -65,7 +78,18 @@ async def evaluate_listing(
         if specs.battery_health >= 95 and specs.battery_cycles >= 250:
             specs.defects.add("battery_replaced")
 
-    # 2. Dynamic battery threshold based on iPhone generation
+    # 2. Old used iPhones with 100% battery usually have a replaced or
+    # reprogrammed battery. Current models are allowed to still be at 100%.
+    if (
+        specs.battery_health == 100
+        and device.brand == "apple"
+        and device.model
+        and not specs.is_new
+        and not _is_recent_iphone_model(device.model)
+    ):
+        specs.defects.add("battery_replaced")
+
+    # 3. Dynamic battery threshold based on iPhone generation
     if specs.battery_health is not None:
         if device.brand == "apple" and device.model:
             model_lower = device.model.lower()
