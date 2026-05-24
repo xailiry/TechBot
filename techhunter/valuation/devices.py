@@ -139,6 +139,7 @@ async def _prices(device_id: int, conditions, session: AsyncSession | None = Non
 async def _upsert_baseline(
     device_id: int, condition: str, median: int, sample: int, session: AsyncSession | None = None
 ) -> None:
+    now = datetime.now(timezone.utc)
     stmt = (
         sqlite_insert(MarketBaseline)
         .values(
@@ -146,12 +147,17 @@ async def _upsert_baseline(
             condition=condition,
             median_price=median,
             sample_size=sample,
+            updated_at=now,
         )
         .on_conflict_do_update(
             index_elements=[
                 MarketBaseline.device_id, MarketBaseline.condition
             ],
-            set_={"median_price": median, "sample_size": sample},
+            set_={
+                "median_price": median,
+                "sample_size": sample,
+                "updated_at": now,
+            },
         )
     )
     if session is not None:
