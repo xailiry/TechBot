@@ -69,7 +69,12 @@ async def evaluate_listing(
     if specs.battery_health is not None:
         if device.brand == "apple" and device.model:
             model_lower = device.model.lower()
-            if "15" in model_lower or "16" in model_lower:
+            if (
+                "15" in model_lower
+                or "16" in model_lower
+                or "17" in model_lower
+                or "air" in model_lower
+            ):
                 threshold = 85
             elif "13" in model_lower or "14" in model_lower:
                 threshold = 82

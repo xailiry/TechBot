@@ -9,10 +9,11 @@ from dataclasses import dataclass
 
 from ..textnorm import normalize_homoglyphs
 
+_IPHONE_AIR_RE = re.compile(r"(?:iphone|айфон|айф)\s*(?:1[0-9]\s*)?air\b", re.I)
 _IPHONE_RE = re.compile(
     r"(?:iphone|айфон|айф)\s*"
-    r"(1[0-6]|[5-9]|se|xr|xs|x)\s*"
-    r"(pro\s*max|pro|plus|mini|max|про\s*макс|про|плюс|мини|макс)?",
+    r"(1[0-9]|[5-9]|se|xr|xs|x)\s*"
+    r"(pro\s*max|pro|plus|mini|max|e|про\s*макс|про|плюс|мини|макс)?",
     re.I,
 )
 _SAMSUNG_S_RE = re.compile(
@@ -76,6 +77,7 @@ _VARIANT_NORM = {
     "plus": "Plus", "мини": "mini", "mini": "mini", "макс": "Max",
     "max": "Max", "ультра": "Ultra", "ultra": "Ultra", "fe": "FE",
     "+": "Plus", "лайт": "Lite", "lite": "Lite", "т": "T", "t": "T",
+    "e": "e",
 }
 
 
@@ -110,6 +112,8 @@ def _norm_variant(v: str | None) -> str:
 
 
 def _iphone_model(text: str) -> str | None:
+    if _IPHONE_AIR_RE.search(text):
+        return "iPhone Air"
     m = _IPHONE_RE.search(text)
     if not m:
         return None
@@ -127,6 +131,8 @@ def _iphone_model(text: str) -> str | None:
         base = f"iPhone {num.upper()}"
     else:
         base = f"iPhone {num}"
+    if variant == "e":
+        return f"{base}e"
     return f"{base} {variant}".strip()
 
 

@@ -119,6 +119,14 @@ def test_normalize() -> None:
 
     check("iphone se", normalize_device("iPhone SE 2022").model == "iPhone SE 2022")
     check("iphone xr", normalize_device("айфон xr").model == "iPhone XR")
+    check("iphone 16e",
+          normalize_device("iPhone 16e, 128 ГБ").model == "iPhone 16e")
+    check("iphone 17 pro max",
+          normalize_device("iPhone 17 Pro Max 256 ГБ").model == "iPhone 17 Pro Max")
+    check("iphone 17e",
+          normalize_device("iPhone 17e 256 ГБ").model == "iPhone 17e")
+    check("iphone air", normalize_device("iPhone Air 256 ГБ").model == "iPhone Air")
+    check("iphone 17 air", normalize_device("iPhone 17 Air 256 ГБ").model == "iPhone Air")
     sg = normalize_device("Samsung Galaxy S24 Ultra")
     check("samsung s24 ultra", sg.brand == "samsung" and sg.model == "Galaxy S24 Ultra")
     zf = normalize_device("Galaxy Z Fold5 512")

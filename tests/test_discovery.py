@@ -100,6 +100,19 @@ async def test_verdict_deal_vs_skip_with_baseline() -> None:
     check("baseline + pricey -> skip", pricey == "skip")
 
 
+async def test_iphone_16e_does_not_use_iphone_16_baseline() -> None:
+    regular = await _resolve_device("iPhone 16 128GB")
+    budget = await _resolve_device("iPhone 16e 128GB")
+    await set_manual_baseline(regular, 43000)
+    await set_manual_baseline(budget, 33000)
+
+    verdict = await fast_value_listing(
+        _item("d16e", "iPhone 16e, 128 ГБ, SIM + eSIM", 31000),
+        is_discovery=True,
+    )
+    check("16e uses own baseline", verdict == "skip")
+
+
 async def test_learn_uses_card_not_detail() -> None:
     """Discovery learning logs an observation from the card and must NOT open
     the listing detail page (no process_new_listing call)."""
@@ -405,6 +418,7 @@ def main() -> None:
     asyncio.run(test_verdict_learn_without_baseline())
     asyncio.run(test_verdict_uses_model_fallback_without_storage())
     asyncio.run(test_verdict_deal_vs_skip_with_baseline())
+    asyncio.run(test_iphone_16e_does_not_use_iphone_16_baseline())
     asyncio.run(test_learn_uses_card_not_detail())
     asyncio.run(test_storage_missing_opens_detail_for_learning())
     asyncio.run(test_deal_budget_defers())

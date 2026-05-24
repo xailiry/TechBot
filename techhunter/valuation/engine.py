@@ -141,7 +141,11 @@ async def learn_from_card(item: "ParsedListing", source: str = "avito") -> bool:
     # Only title-level shop signals are visible before the detail page; enough
     # to drop the obvious resellers from the learned median.
     if looks_shoplike(
-        item.title, item.description, item.seller_type, item.seller_listings
+        item.title,
+        item.description,
+        item.seller_type,
+        item.seller_listings,
+        item.seller_reviews,
     ):
         return False
     device_id = await get_or_create_device(
@@ -180,7 +184,7 @@ async def value_listing(
         # log_observation.
         v.shoplike = looks_shoplike(
             item.title, item.description,
-            item.seller_type, item.seller_listings,
+            item.seller_type, item.seller_listings, item.seller_reviews,
         )
         if (
             log_obs
@@ -222,6 +226,7 @@ async def value_listing(
         baseline_price=baseline,
         seller_type=item.seller_type,
         seller_listings=item.seller_listings,
+        seller_reviews=item.seller_reviews,
         reused_image_count=report.reused_image_count,
         visual=report.visual,
         defects=report.defects,

@@ -84,6 +84,14 @@ def test_shoplike() -> None:
           looks_shoplike("iPhone 15 Pro", "", seller_type="shop"))
     check("many listings",
           looks_shoplike("iPhone 15 Pro", "", seller_listings=50))
+    check("reviewed private reseller",
+          looks_shoplike(
+              "iPhone 16e",
+              "",
+              seller_type="private",
+              seller_listings=6,
+              seller_reviews=34,
+          ))
     check("plain private NOT shoplike",
           not looks_shoplike("iPhone 15 Pro 128", "продаю свой, акб 92%",
                              seller_type="private", seller_listings=2))

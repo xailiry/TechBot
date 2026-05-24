@@ -91,6 +91,7 @@ def looks_shoplike(
     description: str = "",
     seller_type: str | None = None,
     seller_listings: int | None = None,
+    seller_reviews: int | None = None,
 ) -> bool:
     """True if the listing is a shop / reseller / refurbisher / wholesale.
     Such listings are excluded from baseline LEARNING so the reference
@@ -99,6 +100,14 @@ def looks_shoplike(
     if seller_type == "shop":
         return True
     if seller_listings is not None and seller_listings >= 30:
+        return True
+    if (
+        seller_type == "private"
+        and seller_listings is not None
+        and seller_reviews is not None
+        and seller_listings >= 5
+        and seller_reviews >= 20
+    ):
         return True
     text = normalize_homoglyphs(f"{title} {description}")
     shop_text = _NOT_REFURB.sub(" ", text)
@@ -118,6 +127,7 @@ def score_listing(
     baseline_price: int | None = None,
     seller_type: str | None = None,
     seller_listings: int | None = None,
+    seller_reviews: int | None = None,
     reused_image_count: int = 0,
     visual: dict | None = None,
     defects: list[str] | None = None,
@@ -155,7 +165,13 @@ def score_listing(
         score -= 12
         cons.append("продавец — магазин")
     elif seller_type == "private":
-        if seller_listings and seller_listings >= 50:
+        if seller_listings and seller_reviews and seller_listings >= 5 and seller_reviews >= 20:
+            score -= 18
+            no_original = True
+            cons.append(
+                f"«частник» с {seller_listings} объявл. и {seller_reviews} отзывами — похож на перекупа"
+            )
+        elif seller_listings and seller_listings >= 50:
             score -= 18
             cons.append(f"«частник» с {seller_listings} объявл. — магазин в маске")
         elif seller_listings and seller_listings >= 20:

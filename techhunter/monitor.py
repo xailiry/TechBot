@@ -91,7 +91,13 @@ async def _onboard(browser, sub, notifier: Notifier, announce: bool) -> None:
                 rep = await evaluate_listing(it, run_clip=False, do_dedup=False)
             except Exception: return
             did = await get_or_create_device(rep.brand, rep.model or "", rep.storage_gb, rep.ram_gb)
-            if did is None or rep.is_sealed or looks_shoplike(it.title, it.description, it.seller_type, it.seller_listings):
+            if did is None or rep.is_sealed or looks_shoplike(
+                it.title,
+                it.description,
+                it.seller_type,
+                it.seller_listings,
+                it.seller_reviews,
+            ):
                 return
             if await log_observation(did, rep.condition, it.price, listing_id=it.id, raw_title=it.title, storage_gb=rep.storage_gb):
                 device_ids.add(did)
