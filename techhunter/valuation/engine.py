@@ -266,6 +266,7 @@ async def value_listing(
         visual=report.visual,
         defects=report.defects,
         avito_market_badge=getattr(item, "avito_market_badge", False),
+        avito_price_badge=getattr(item, "avito_price_badge", None),
     )
     v.scam_score = scam.score
     v.scam_verdict = scam.verdict
@@ -288,6 +289,7 @@ async def value_listing(
     cond = report.condition
     market_badge_conflict = (
         bool(getattr(item, "avito_market_badge", False))
+        and getattr(item, "avito_price_badge", None) in (None, "market")
         and cond in _WORKING
         and item.price > 0
         and comparison_baseline > 0

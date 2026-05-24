@@ -21,6 +21,18 @@ _AVITO_MARKET_BADGE_RE = re.compile(
     r"рыночная\s+цена|независимая\s+оценка\s+авито",
     re.I,
 )
+_AVITO_PRICE_BELOW_RE = re.compile(r"цена\s+ниже\s+рыночн", re.I)
+_AVITO_PRICE_ABOVE_RE = re.compile(r"цена\s+выше\s+рыночн", re.I)
+
+
+def _parse_avito_price_badge(text: str) -> str | None:
+    if _AVITO_PRICE_BELOW_RE.search(text):
+        return "below"
+    if _AVITO_PRICE_ABOVE_RE.search(text):
+        return "above"
+    if _AVITO_MARKET_BADGE_RE.search(text):
+        return "market"
+    return None
 
 
 def _parse_price(text: str) -> int:
@@ -146,7 +158,8 @@ def parse_detail(html: str, item: ParsedListing) -> ParsedListing:
 
     item.images = parse_gallery(soup)
     page_text = soup.get_text(" ", strip=True)
-    item.avito_market_badge = bool(_AVITO_MARKET_BADGE_RE.search(page_text))
+    item.avito_price_badge = _parse_avito_price_badge(page_text)
+    item.avito_market_badge = item.avito_price_badge is not None
 
     params_el = soup.find(attrs={"data-marker": "item-view/item-params"})
     if params_el:

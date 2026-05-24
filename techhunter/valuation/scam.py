@@ -132,6 +132,7 @@ def score_listing(
     visual: dict | None = None,
     defects: list[str] | None = None,
     avito_market_badge: bool = False,
+    avito_price_badge: str | None = None,
 ) -> ScamScore:
     full = normalize_homoglyphs(f"{title} {description}")
     pros: list[str] = []
@@ -139,6 +140,7 @@ def score_listing(
     score = 50
     visual = visual or {}
     defects = defects or []
+    avito_price_badge = avito_price_badge or ("market" if avito_market_badge else None)
 
     fake = _any(full, _FAKE)
     if fake:
@@ -197,7 +199,13 @@ def score_listing(
         elif 0.40 <= ratio <= 0.85:
             score += 14
             pros.append(f"цена {ratio*100:.0f}% от рынка — хороший арбитраж")
-        if avito_market_badge and ratio <= 0.70:
+        if avito_price_badge == "below":
+            score += 8
+            pros.append("Авито: цена ниже рыночной")
+        elif avito_price_badge == "above":
+            score -= 12
+            cons.append("Авито: цена выше рыночной")
+        elif avito_price_badge == "market" and ratio <= 0.70:
             score -= 14
             cons.append(
                 "Авито считает цену рыночной — проверь заявленное состояние"

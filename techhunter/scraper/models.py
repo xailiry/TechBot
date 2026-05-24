@@ -26,6 +26,7 @@ class ParsedListing(BaseModel):
     images: list[str] = Field(default_factory=list)
     description: str = ""
     params: dict[str, str] = Field(default_factory=dict)
+    avito_price_badge: str | None = None  # below | market | above
     avito_market_badge: bool = False
     seller_name: str | None = None
     seller_label: str | None = None

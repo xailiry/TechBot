@@ -118,6 +118,20 @@ def test_scam() -> None:
     check("broken cheap not auto-suspicious",
           cheap_broken.verdict != "fake")
 
+    below = score_listing(
+        "iPhone 13 128", "всё работает", 45000,
+        condition="good", baseline_price=60000, avito_price_badge="below",
+    )
+    check("avito below badge adds pro",
+          any("ниже рыночной" in p for p in below.pros))
+
+    above = score_listing(
+        "iPhone 13 128", "всё работает", 45000,
+        condition="good", baseline_price=60000, avito_price_badge="above",
+    )
+    check("avito above badge adds con",
+          any("выше рыночной" in c for c in above.cons))
+
     check("homoglyph normalize",
           "айфон" in normalize_homoglyphs("aйфoн".replace("o", "о")) or
           normalize_homoglyphs("Bаре") == "Варе")

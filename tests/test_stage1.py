@@ -34,7 +34,7 @@ DETAIL_HTML = """
 <html><head><meta property="og:image" content="https://img.avito.st/og.jpg"></head>
 <body>
 <div data-marker="item-view/item-description">Идеал, акб 89%, Face ID работает.</div>
-<div>Рыночная цена <span>Независимая оценка Авито</span></div>
+<div>Цена ниже рыночной <span>Независимая оценка Авито</span></div>
 <div data-marker="item-view/item-params"><ul>
   <li>Объём встроенной памяти: 128 ГБ</li>
   <li>Состояние: Б/у</li>
@@ -87,6 +87,7 @@ def test_detail_parse() -> None:
     it = parse_detail(DETAIL_HTML, items[0])
     check("desc", "Face ID" in it.description)
     check("market badge", it.avito_market_badge is True)
+    check("price badge below", it.avito_price_badge == "below")
     check("param memory", it.params.get("объём встроенной памяти") == "128 ГБ")
     check("seller name", it.seller_name == "Иван")
     check("seller type private", it.seller_type == "private")

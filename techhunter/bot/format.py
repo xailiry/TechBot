@@ -147,7 +147,12 @@ def format_deal_card(item, report, valuation, sub_query: str = "") -> str:
         }.get(valuation.baseline_confidence)
         if conf:
             lines.append(f"{conf} (выборка {valuation.baseline_sample})")
-    if getattr(item, "avito_market_badge", False):
+    avito_badge = getattr(item, "avito_price_badge", None)
+    if avito_badge == "below":
+        lines.append("🏷 Авито: цена ниже рыночной")
+    elif avito_badge == "above":
+        lines.append("🏷 Авито: цена выше рыночной")
+    elif getattr(item, "avito_market_badge", False):
         lines.append("🏷 Авито: рыночная цена по заявленному состоянию")
 
     # 4. Seller.
