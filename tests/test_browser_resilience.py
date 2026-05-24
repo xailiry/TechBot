@@ -23,6 +23,18 @@ class FakePage:
         self.closed = True
 
 
+class FakeNotifier:
+    def __init__(self) -> None:
+        self.detected = 0
+        self.cleared = 0
+
+    async def captcha_detected(self, url: str) -> None:
+        self.detected += 1
+
+    async def captcha_cleared(self) -> None:
+        self.cleared += 1
+
+
 def test_is_closed_error() -> None:
     yes = [
         "Target page, context or browser has been closed",
@@ -142,6 +154,61 @@ async def test_pools_independent() -> None:
     check("deep pool size returned", b._deep_pool.qsize() == 1)
 
 
+async def test_captcha_notify_force_bypasses_throttle() -> None:
+    notifier = FakeNotifier()
+    b = AvitoBrowser(notifier=notifier)  # type: ignore[arg-type]
+    b._last_captcha_notify = 10**12
+
+    ok = await b._notify_captcha_detected("https://www.avito.ru/captcha", force=True)
+    blocked = await b._notify_captcha_detected(
+        "https://www.avito.ru/captcha", force=False
+    )
+
+    check("captcha notify forced", ok and notifier.detected == 1)
+    check("captcha notify reminder throttled", not blocked and notifier.detected == 1)
+
+
+async def test_solved_captcha_page_not_double_reloaded() -> None:
+    b = AvitoBrowser()
+    page = FakePage()
+    reloads = {"count": 0}
+
+    async def _wait(url: str) -> bool:
+        b._captcha_solved_page = page  # type: ignore[assignment]
+        return True
+
+    async def _reload(pg) -> None:
+        reloads["count"] += 1
+
+    b._run_captcha_wait = _wait  # type: ignore[method-assign]
+    b._reload = _reload  # type: ignore[method-assign]
+
+    ok = await b._ensure_unblocked(page, "https://www.avito.ru/captcha")  # type: ignore[arg-type]
+    check("captcha solved page resumes", ok)
+    check("captcha solved page not reloaded twice", reloads["count"] == 0)
+
+
+async def test_other_blocked_page_reloaded_after_solve() -> None:
+    b = AvitoBrowser()
+    page = FakePage()
+    solved_elsewhere = FakePage()
+    reloads = {"count": 0}
+
+    async def _wait(url: str) -> bool:
+        b._captcha_solved_page = solved_elsewhere  # type: ignore[assignment]
+        return True
+
+    async def _reload(pg) -> None:
+        reloads["count"] += 1
+
+    b._run_captcha_wait = _wait  # type: ignore[method-assign]
+    b._reload = _reload  # type: ignore[method-assign]
+
+    ok = await b._ensure_unblocked(page, "https://www.avito.ru/captcha")  # type: ignore[arg-type]
+    check("other blocked page resumes", ok)
+    check("other blocked page reloaded", reloads["count"] == 1)
+
+
 def main() -> None:
     test_is_closed_error()
     asyncio.run(test_acquire_pooled())
@@ -149,6 +216,9 @@ def main() -> None:
     asyncio.run(test_release_after_pool_swap())
     asyncio.run(test_restart_rate_limited())
     asyncio.run(test_pools_independent())
+    asyncio.run(test_captcha_notify_force_bypasses_throttle())
+    asyncio.run(test_solved_captcha_page_not_double_reloaded())
+    asyncio.run(test_other_blocked_page_reloaded_after_solve())
     print("\nAll browser-resilience checks passed.")
 
 

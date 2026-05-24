@@ -35,6 +35,12 @@ def test_block_detection() -> None:
           not page_blocked(legit_with_bundle))
     check("is_block_page ignores bare datadome",
           not is_block_page("<script>datadome captcha sdk</script>"))
+    captcha_overlay = results + '<div data-marker="captcha">solve</div>'
+    check("real captcha wins over stale results",
+          page_blocked(captcha_overlay))
+    detail_captcha = detail + '<div data-marker="captcha">solve</div>'
+    check("detail captcha wins over stale detail",
+          page_blocked(detail_captcha, detail=True))
 
     check("real block page", is_block_page(block)
           and page_blocked(block))

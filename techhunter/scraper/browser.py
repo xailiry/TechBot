@@ -16,12 +16,13 @@ from typing import TYPE_CHECKING
 
 from playwright.async_api import BrowserContext, Page, async_playwright
 
-from .. import config
+from .. import config, runtime
 from .models import ParsedListing
 
 if TYPE_CHECKING:
     from ..notifier import Notifier
 from .parser import (
+    has_detail,
     has_listings,
     page_blocked,
     parse_detail,
@@ -57,6 +58,7 @@ class AvitoBrowser:
         self._last_captcha_notify = 0.0
         # Pages currently actively waiting in _ensure_unblocked
         self._blocked_pages: set[Page] = set()
+        self._captcha_solved_page: Page | None = None
 
     @staticmethod
     def _is_closed_error(err: object) -> bool:
@@ -280,7 +282,7 @@ class AvitoBrowser:
     async def _reload_safe_staggered(self, page: Page) -> None:
         await asyncio.sleep(random.uniform(0.5, 3.0))
         with contextlib.suppress(Exception):
-            if not page.is_closed() and page.url != "about:blank":
+            if not self._is_page_closed(page) and page.url != "about:blank":
                 await page.reload(
                     wait_until="domcontentloaded", timeout=config.NAV_TIMEOUT_MS
                 )
@@ -310,21 +312,62 @@ class AvitoBrowser:
                 with contextlib.suppress(Exception):
                     await probe.close()
 
+    async def _notify_captcha_detected(self, url: str, *, force: bool = False) -> bool:
+        if not self.notifier:
+            return False
+        now = time.time()
+        if (
+            not force
+            and now - self._last_captcha_notify
+            < config.CAPTCHA_NOTIFY_INTERVAL_SEC
+        ):
+            return False
+        try:
+            await self.notifier.captcha_detected(url)
+        except Exception as e:
+            log.warning("Browser: captcha notification failed: %s", e)
+            return False
+        self._last_captcha_notify = now
+        return True
+
+    async def _notify_captcha_cleared(self) -> None:
+        if not self.notifier:
+            return
+        try:
+            await self.notifier.captcha_cleared()
+        except Exception as e:
+            log.debug("Browser: captcha-cleared notification failed: %s", e)
+
+    async def _refresh_stale_captcha_pages(self, exclude: set[Page]) -> None:
+        """Refresh tabs that are visibly stuck on captcha but are not part of
+        the active waiters. Active waiters reload themselves after the gate
+        opens; the tab where the human solved captcha keeps its current DOM."""
+        if self._ctx is None:
+            return
+
+        tasks = []
+        for p in list(self._ctx.pages):
+            try:
+                if p in exclude or self._is_page_closed(p) or p.url == "about:blank":
+                    continue
+                p_html = await p.content()
+                url_low = p.url.lower()
+                if page_blocked(p_html) or "datadome" in url_low or "captcha" in url_low:
+                    log.info("Browser: auto-refreshing stale captcha page: %s", p.url)
+                    tasks.append(self._reload_safe_staggered(p))
+            except Exception as e:
+                log.debug("Browser: stale captcha page check failed: %s", e)
+
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
     async def _run_captcha_wait(self, url: str) -> bool:
-        """First detector only: notify once, poll open pages and out-of-band probe until
+        """First detector only: notify, poll open pages and out-of-band probe until
         the human solves the captcha on any one tab."""
         self.paused.set()
-        # Throttle: a long block re-enters the gate every cycle; do not
-        # spam the operator each time.
-        notified = False
-        if self.notifier and (
-            time.time() - self._last_captcha_notify
-            > config.CAPTCHA_NOTIFY_INTERVAL_SEC
-        ):
-            self._last_captcha_notify = time.time()
-            notified = True
-            with contextlib.suppress(Exception):
-                await self.notifier.captcha_detected(url)
+        runtime.set_captcha(True)
+        self._captcha_solved_page = None
+        notified = await self._notify_captcha_detected(url, force=True)
         deadline = (
             None
             if config.CAPTCHA_MAX_WAIT_SEC <= 0
@@ -333,8 +376,13 @@ class AvitoBrowser:
         try:
             # Out of band check counter to throttle probe_clear hits
             oob_counter = 0
+            recheck_sec = max(1, config.CAPTCHA_RECHECK_SEC)
             while deadline is None or time.time() < deadline:
-                await asyncio.sleep(3)
+                await asyncio.sleep(recheck_sec)
+                notified = (
+                    await self._notify_captcha_detected(url, force=False)
+                    or notified
+                )
                 
                 # 1. Quick check: did the human solve it? Only inspect the
                 # pages that are ACTUALLY blocked right now (they show the
@@ -342,55 +390,48 @@ class AvitoBrowser:
                 # Scanning every tab gave false positives: other pooled tabs
                 # still display stale results from the previous cycle, so the
                 # gate "cleared" itself instantly the moment a captcha popped.
-                solved_on_page = False
+                solved_page: Page | None = None
                 for p in list(self._blocked_pages):
                     try:
-                        if p.is_closed() or p.url == "about:blank":
+                        if self._is_page_closed(p) or p.url == "about:blank":
                             continue
                         p_html = await p.content()
-                        if has_listings(p_html) or "item-view/item-description" in p_html:
+                        if has_listings(p_html) or has_detail(p_html):
                             log.info("Browser: detected captcha solve on blocked page: %s", p.url)
-                            solved_on_page = True
+                            solved_page = p
+                            self._captcha_solved_page = p
                             break
                     except Exception:
                         continue
 
                 # 2. Slow fallback check: run the out of band probe once every 12 seconds
                 oob_solved = False
-                oob_counter += 3
-                if not solved_on_page and oob_counter >= 12:
+                oob_counter += recheck_sec
+                if solved_page is None and oob_counter >= 12:
                     oob_counter = 0
                     oob_solved = await self._probe_clear()
 
-                if solved_on_page or oob_solved:
-                    if notified and self.notifier:
-                        with contextlib.suppress(Exception):
-                            await self.notifier.captcha_cleared()
-                    
-                    # 3. Reload ALL pages currently stuck on a captcha or Datadome screen
-                    if self._ctx:
-                        for p in list(self._ctx.pages):
-                            try:
-                                if p.is_closed() or p.url == "about:blank":
-                                    continue
-                                p_html = await p.content()
-                                if page_blocked(p_html) or "datadome" in p.url or "captcha" in p.url:
-                                    log.info("Browser: auto-refreshing blocked page: %s", p.url)
-                                    asyncio.create_task(self._reload_safe(p))
-                            except Exception as re:
-                                log.debug("Browser: auto-refresh page failed: %s", re)
-                                
+                if solved_page or oob_solved:
+                    if notified:
+                        await self._notify_captcha_cleared()
+
+                    exclude = set(self._blocked_pages)
+                    if solved_page is not None:
+                        exclude.add(solved_page)
+                    await self._refresh_stale_captcha_pages(exclude)
                     return True
             log.warning("Captcha not solved within %ss, will retry later.",
                         config.CAPTCHA_MAX_WAIT_SEC)
             return False
         finally:
             self.paused.clear()
+            runtime.set_captcha(False)
 
     async def _ensure_unblocked(self, page: Page, url: str) -> bool:
         """Called by any tab that hit a block. Exactly one coroutine becomes
-        the handler (notifies + waits); the others just wait, then every tab
-        reloads itself so work resumes without manual page refresh."""
+        the handler (notifies + waits); the others just wait, then blocked
+        tabs reload themselves unless this is the tab where the captcha was
+        solved and the real page DOM is already visible."""
         self._blocked_pages.add(page)
         try:
             am_first = False
@@ -409,7 +450,8 @@ class AvitoBrowser:
                 await self._unblocked.wait()
                 # Stagger so the pool does not reload all tabs at once.
                 await asyncio.sleep(random.uniform(0.5, 2.5))
-            await self._reload(page)
+            if page is not self._captcha_solved_page:
+                await self._reload(page)
             return True
         finally:
             self._blocked_pages.discard(page)
@@ -479,17 +521,16 @@ class AvitoBrowser:
             await self._maybe_restart(e)
             return []
 
+        if page_blocked(html):
+            # Blocked: session-wide gate (one notify), then this tab resumes.
+            if await self._ensure_unblocked(page, url):
+                with contextlib.suppress(Exception):
+                    new_html = await page.content()
+                    return parse_listings(new_html) if has_listings(new_html) else []
+            return []
         if has_listings(html):
             return parse_listings(html)
-        if not page_blocked(html):
-            return []  # genuinely empty search, not a block -> no captcha
-
-        # Blocked: session-wide gate (one notify), then this tab is reloaded.
-        if await self._ensure_unblocked(page, url):
-            with contextlib.suppress(Exception):
-                new_html = await page.content()
-                return parse_listings(new_html) if has_listings(new_html) else []
-        return []
+        return []  # genuinely empty search, not a block -> no captcha
 
     async def fetch_details(self, item: ParsedListing, mode: str = "fast") -> ParsedListing:
         async with self.acquire_page(mode=mode) as page:

@@ -263,13 +263,17 @@ def is_block_page(html: str | None) -> bool:
 
 
 def page_blocked(html: str | None, *, detail: bool = False) -> bool:
-    """Robust decision for the captcha gate: blocked only if the positive
-    result marker is ABSENT and a real block/loading signal is present.
+    """Robust decision for the captcha gate: a real block marker wins even
+    if the page also contains stale/listing markup from a partially rendered
+    response. Bare "captcha"/"datadome" script text is still ignored by
+    is_block_page, so normal Avito bundles do not trip this.
     An empty search (no results, no block) returns False -> not a captcha."""
+    if is_block_page(html):
+        return True
     positive = has_detail(html) if detail else has_listings(html)
     if positive:
         return False
-    return is_block_page(html) or looks_loading(html)
+    return looks_loading(html)
 
 
 def looks_blocked(html: str | None) -> bool:
