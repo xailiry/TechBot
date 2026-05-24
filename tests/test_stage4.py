@@ -236,6 +236,24 @@ async def test_edit_not_modified_no_resend() -> None:
     check("not modified no resend", Cb.message.answers == 0)
 
 
+async def test_expired_callback_answer_suppressed() -> None:
+    from aiogram.exceptions import TelegramBadRequest
+    from techhunter.bot.app import _answer_cb
+
+    class Cb:
+        async def answer(self, *args, **kwargs):
+            raise TelegramBadRequest(
+                method=object(),
+                message=(
+                    "Bad Request: query is too old and response timeout "
+                    "expired or query ID is invalid"
+                ),
+            )
+
+    await _answer_cb(Cb(), "ok")
+    check("expired callback answer suppressed", True)
+
+
 def test_imports() -> None:
     import inspect
 
@@ -366,6 +384,7 @@ def main() -> None:
     asyncio.run(test_subs_and_dedup())
     asyncio.run(test_empty_list_no_markup())
     asyncio.run(test_edit_not_modified_no_resend())
+    asyncio.run(test_expired_callback_answer_suppressed())
     test_imports()
     print("\nAll Stage 4 checks passed.")
 

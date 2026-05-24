@@ -59,12 +59,29 @@ async def _edit(cb: CallbackQuery, built: tuple) -> None:
             return
         log.debug("edit failed (%s), resending", e)
         await cb.message.answer(text, parse_mode="HTML", reply_markup=kb)
+
     except Exception as e:  # message unchanged / too old -> resend
         log.debug("edit failed (%s), resending", e)
         await cb.message.answer(text, parse_mode="HTML", reply_markup=kb)
 
 
 # ─── Commands (shortcuts) ───────────────────────────────────────────────────
+
+async def _answer_cb(cb: CallbackQuery, *args, **kwargs) -> None:
+    """Answer callback queries without noisy logs for expired Telegram clicks."""
+    try:
+        await cb.answer(*args, **kwargs)
+    except TelegramBadRequest as e:
+        msg = str(e).lower()
+        if (
+            "query is too old" in msg
+            or "response timeout expired" in msg
+            or "query id is invalid" in msg
+        ):
+            log.debug("callback answer expired: %s", e)
+            return
+        raise
+
 
 @dp.message(CommandStart())
 @dp.message(Command("menu"))
@@ -262,7 +279,7 @@ async def cmd_train_stat(msg: Message) -> None:
 
 @dp.callback_query(F.data == "noop")
 async def cb_noop(cb: CallbackQuery) -> None:
-    await cb.answer()
+    await _answer_cb(cb)
 
 
 @dp.callback_query(F.data.startswith("nav:"))
@@ -293,14 +310,14 @@ async def cb_nav(cb: CallbackQuery, state: FSMContext) -> None:
     elif dest == "prices":
         sid = int(parts[2]) if len(parts) > 2 else 0
         await _edit(cb, await screen_prices(cb.from_user.id, sid))
-    await cb.answer()
+    await _answer_cb(cb)
 
 
 @dp.callback_query(F.data.startswith("sub:del:"))
 async def cb_sub_del(cb: CallbackQuery) -> None:
     _, _, sid, page = cb.data.split(":")
     ok = await remove_subscription(cb.from_user.id, int(sid))
-    await cb.answer("Удалено" if ok else "Не найдено")
+    await _answer_cb(cb, "Удалено" if ok else "Не найдено")
     await _edit(cb, await screen_subs(cb.from_user.id, int(page)))
 
 
@@ -326,7 +343,7 @@ async def cb_settings(cb: CallbackQuery) -> None:
     elif action == "cond":
         await toggle_exclude_condition(tg, parts[2])
         await _edit(cb, await screen_settings(tg))
-    await cb.answer("Сохранено")
+    await _answer_cb(cb, "Сохранено")
 
 
 @dp.callback_query(F.data.startswith("disc:"))
@@ -346,7 +363,7 @@ async def cb_discovery(cb: CallbackQuery) -> None:
     if action in ("on", "off"):
         enable = action == "on"
         await set_discovery_enabled(tg, enable)
-        await cb.answer("Discovery включён" if enable else "Discovery выключен")
+        await _answer_cb(cb, "Discovery включён" if enable else "Discovery выключен")
     elif action == "profit":
         delta = int(parts[2])
         async with get_session() as s:
@@ -354,7 +371,7 @@ async def cb_discovery(cb: CallbackQuery) -> None:
             cur = u.discovery_min_profit_rub if u else config.DISCOVERY_MIN_PROFIT_RUB
         new = max(0, cur + delta)
         await set_discovery_profit(tg, rub=new)
-        await cb.answer(f"Мин. профит: {new}₽")
+        await _answer_cb(cb, f"Мин. профит: {new}₽")
     elif action == "ratio":
         delta = int(parts[2])  # percentage points
         async with get_session() as s:
@@ -362,9 +379,9 @@ async def cb_discovery(cb: CallbackQuery) -> None:
             cur = u.discovery_min_profit_ratio if u else config.DISCOVERY_MIN_PROFIT_RATIO
         new = min(0.9, max(0.0, round(cur + delta / 100, 2)))
         await set_discovery_profit(tg, ratio=new)
-        await cb.answer(f"Мин. маржа: {int(new * 100)}%")
+        await _answer_cb(cb, f"Мин. маржа: {int(new * 100)}%")
     else:
-        await cb.answer()
+        await _answer_cb(cb)
         return
     await _edit(cb, await screen_discovery(cb.from_user.id))
 
@@ -388,7 +405,7 @@ async def cb_add_start(cb: CallbackQuery, state: FSMContext) -> None:
             InlineKeyboardButton(text="✖️ Отмена", callback_data="nav:hub")
         ]]),
     )
-    await cb.answer()
+    await _answer_cb(cb)
 
 
 @dp.message(StateFilter(AddSub.waiting), F.text & ~F.text.startswith("/"))
@@ -421,29 +438,30 @@ async def fsm_add_text(msg: Message, state: FSMContext) -> None:
 async def cb_haggle(cb: CallbackQuery) -> None:
     st = await get_card_state(cb.from_user.id, cb.message.message_id)
     if not st:
-        await cb.answer("Данные карточки устарели.", show_alert=True)
+        await _answer_cb(cb, "Данные карточки устарели.", show_alert=True)
         return
     try:
         text = haggle_text(st["item"], st["valuation"])
     except Exception as e:
         log.debug("haggle build failed: %s", e)
-        await cb.answer("Не удалось собрать скрипт.", show_alert=True)
+        await _answer_cb(cb, "Не удалось собрать скрипт.", show_alert=True)
         return
     await cb.message.reply(
         f"📋 <b>Скрипт для копирования:</b>\n\n{text}", parse_mode="HTML"
     )
-    await cb.answer()
+    await _answer_cb(cb)
 
 
 @dp.callback_query(F.data.startswith("fb:"))
 async def cb_feedback(cb: CallbackQuery) -> None:
     parts = cb.data.split(":", 2)
     if len(parts) < 3:
-        await cb.answer()
+        await _answer_cb(cb)
         return
     direction = "up" if parts[1] == "up" else "down"
     await record_feedback(cb.from_user.id, parts[2], direction)
-    await cb.answer(
+    await _answer_cb(
+        cb,
         "Спасибо, учту 👍" if direction == "up" else "Понял, мимо 👎"
     )
 
