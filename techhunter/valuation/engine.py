@@ -33,6 +33,31 @@ log = logging.getLogger(__name__)
 _WORKING = {"ideal", "good"}
 
 
+def _iphone_generation(model: str | None) -> int | None:
+    if not model:
+        return None
+    import re
+
+    m = re.search(r"\biPhone\s+(\d{1,2})", model)
+    return int(m.group(1)) if m else None
+
+
+def requires_detail_learning(brand: str, model: str | None) -> bool:
+    """True when a search card is too weak a signal for market learning.
+
+    Newer Apple models are commonly mixed with sealed/import/reseller stock,
+    while the card does not reliably show used/new state, battery, seller
+    profile, or Avito condition. Detail fetches are bounded by the existing
+    deep budget in Discovery.
+    """
+    if brand != "apple" or config.DETAIL_LEARN_APPLE_MIN_GENERATION <= 0:
+        return False
+    if model == "iPhone Air":
+        return True
+    gen = _iphone_generation(model)
+    return gen is not None and gen >= config.DETAIL_LEARN_APPLE_MIN_GENERATION
+
+
 class Valuation(BaseModel):
     listing_id: str
     device_key: str | None = None
@@ -118,7 +143,7 @@ async def fast_value_listing(
     return "deal" if (item.price > 0 and item.price < limit) else "skip"
 
 
-async def learn_from_card(item: "ParsedListing", source: str = "avito") -> bool:
+async def learn_from_card(item: "ParsedListing", source: str = "card") -> bool:
     """Card-only price learning: grade condition from the title and log a real
     observation WITHOUT opening the listing detail page. Cheap and calm (no
     browser navigation), so Discovery can learn the whole category fast.
@@ -135,6 +160,8 @@ async def learn_from_card(item: "ParsedListing", source: str = "avito") -> bool:
     if not norm.model:
         return False
     if norm.storage_gb is None:
+        return False
+    if requires_detail_learning(norm.brand, norm.model):
         return False
     if specs.is_new:
         return False  # never learn the used market from sealed/new lots
@@ -198,6 +225,7 @@ async def value_listing(
                 listing_id=item.id,
                 raw_title=item.title,
                 storage_gb=report.storage_gb,
+                source="detail",
             )
 
     baseline = None
@@ -218,12 +246,19 @@ async def value_listing(
             v.baseline_confidence = "low"
         v.condition_baselines = await get_condition_baselines(device_id)
 
+    comparison_baseline = baseline
+    if report.condition in _WORKING:
+        tier_baseline = v.condition_baselines.get(report.condition)
+        if tier_baseline:
+            comparison_baseline = tier_baseline
+            v.baseline_price = tier_baseline
+
     scam = score_listing(
         item.title,
         item.description,
         item.price,
         condition=report.condition,
-        baseline_price=baseline,
+        baseline_price=comparison_baseline,
         seller_type=item.seller_type,
         seller_listings=item.seller_listings,
         seller_reviews=item.seller_reviews,
@@ -237,14 +272,14 @@ async def value_listing(
     v.pros = scam.pros
     v.cons = scam.cons
 
-    if baseline is None:
+    if comparison_baseline is None:
         if "no_device" not in missing:
             missing.append("no_baseline")
         v.missing = missing
         return v
 
     # Honest market price: median minus expected haggle.
-    market = baseline * (1 - config.PROFIT_HAGGLE_PERCENT)
+    market = comparison_baseline * (1 - config.PROFIT_HAGGLE_PERCENT)
 
     if item.price > 0:
         v.gross_profit = int(market - item.price)
@@ -255,8 +290,8 @@ async def value_listing(
         bool(getattr(item, "avito_market_badge", False))
         and cond in _WORKING
         and item.price > 0
-        and baseline > 0
-        and (item.price / baseline) <= config.AVITO_MARKET_BADGE_CONFLICT_RATIO
+        and comparison_baseline > 0
+        and (item.price / comparison_baseline) <= config.AVITO_MARKET_BADGE_CONFLICT_RATIO
     )
 
     if cond in _WORKING:

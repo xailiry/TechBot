@@ -51,7 +51,7 @@ async def case_working_deal() -> None:
     val = await value_listing(it, rep, log_obs=False)
     check("WD battery 91", rep.battery_health == 91)
     check("WD no defects", rep.defects == [])
-    check("WD condition ideal", rep.condition == "ideal")
+    check("WD condition good", rep.condition == "good")
     check("WD model", rep.model == "iPhone 13 Pro [RST]" and rep.storage_gb == 256)
     check("WD net 18000", val.net_profit == 18000)
     check("WD opportunity working",

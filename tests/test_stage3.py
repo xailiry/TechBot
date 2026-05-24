@@ -12,6 +12,7 @@ from techhunter.ai.evaluate import EvaluationReport
 from techhunter.scraper.models import ParsedListing
 from techhunter.valuation.clustering import cluster_high_median, robust_median
 from techhunter.valuation.devices import (
+    _upsert_baseline,
     get_baseline,
     get_or_create_device,
     log_observation,
@@ -240,6 +241,18 @@ async def test_engine() -> None:
     check("working net", val.net_profit == 15000)
     check("working opportunity", val.opportunity is True)
     check("working type", val.opportunity_type == "working")
+
+    # If the detail page grades a phone as merely good, compare it to the
+    # good used tier rather than the combined ideal+good working anchor.
+    dev_good = await get_or_create_device("apple", f"iPhone GOOD {tag}", 128)
+    await _upsert_baseline(dev_good, "working", 43000, 50)
+    await _upsert_baseline(dev_good, "good", 33000, 20)
+    vg = await value_listing(
+        _item(31000, title=f"iPhone GOOD {tag}", desc="акб 94%"),
+        _report(f"iPhone GOOD {tag}", "good"),
+    )
+    check("good tier baseline used", vg.baseline_price == 33000)
+    check("good tier suppresses fake profit", vg.opportunity is False)
 
     # Broken flip with a known repair cost.
     brand = f"apple{tag}"

@@ -49,7 +49,11 @@ def grade_condition(specs: DeviceSpecs, text: str = "") -> Condition:
     low = text.lower()
     if any(k in low for k in _DECLARED_DEFECT_KEYWORDS):
         return Condition.DEFECT
-    if specs.is_sealed or any(k in low for k in _SEALED_KEYWORDS):
+    if specs.is_sealed:
+        return Condition.IDEAL
+    if any(k in low for k in _SEALED_KEYWORDS):
+        if specs.battery_health is not None and specs.battery_health < 97:
+            return Condition.GOOD
         # "идеал" with no detected defects -> top condition.
         return Condition.IDEAL
 

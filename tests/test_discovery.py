@@ -144,6 +144,32 @@ async def test_learn_uses_card_not_detail() -> None:
     check("card observation logged", 22000 in prices)
 
 
+async def test_fresh_iphone_learning_opens_detail() -> None:
+    """Fresh Apple models are too easy to pollute with new/reseller stock from
+    search cards, so Discovery must spend deep budget and inspect detail."""
+    calls = {"n": 0}
+
+    async def _fake_process(browser, it, mode="fast"):
+        calls["n"] += 1
+        return None, None
+
+    orig = monitor.process_new_listing
+    monitor.process_new_listing = _fake_process  # type: ignore
+    try:
+        item = _item("d17", "iPhone 17 Pro 256GB", 85000)
+        budget = {"n": 1}
+        counters = {"errors": 0, "processed": 0, "cached": 0}
+        await monitor._evaluate(
+            object(), item, asyncio.Semaphore(1), {}, counters,
+            mode="fast", is_discovery=True, deep_budget=budget,
+        )
+    finally:
+        monitor.process_new_listing = orig  # type: ignore
+
+    check("fresh iPhone opens detail for learning", calls["n"] == 1)
+    check("fresh iPhone budget decremented", budget["n"] == 0)
+
+
 async def test_storage_missing_opens_detail_for_learning() -> None:
     """If the search card has no storage, Discovery must not learn a
     storage-less market. It spends deep budget and opens detail so structured
@@ -420,6 +446,7 @@ def main() -> None:
     asyncio.run(test_verdict_deal_vs_skip_with_baseline())
     asyncio.run(test_iphone_16e_does_not_use_iphone_16_baseline())
     asyncio.run(test_learn_uses_card_not_detail())
+    asyncio.run(test_fresh_iphone_learning_opens_detail())
     asyncio.run(test_storage_missing_opens_detail_for_learning())
     asyncio.run(test_deal_budget_defers())
     asyncio.run(test_deal_budget_consumed())

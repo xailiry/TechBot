@@ -164,6 +164,8 @@ def test_condition() -> None:
           cond("iPhone 12 Pro", "состояние удовлетворительное")
           == Condition.DEFECT)
     check("ideal -> IDEAL", cond("iPhone 14 идеал") == Condition.IDEAL)
+    check("ideal with 94 battery -> GOOD",
+          cond("iPhone 16e", "идеал, акб 94%") == Condition.GOOD)
     check("plain -> GOOD", cond("iPhone 12 128 б/у") == Condition.GOOD)
 
 
@@ -272,7 +274,7 @@ async def test_evaluate_textonly() -> None:
     check("eval model", r.model == "iPhone 13 Pro")
     check("eval storage", r.storage_gb == 256)
     check("eval battery", r.battery_health == 91)
-    check("eval condition IDEAL", r.condition == "ideal")
+    check("eval condition GOOD", r.condition == "good")
     check("eval visual empty", r.visual == {})
     check("eval reused 0", r.reused_image_count == 0)
 
