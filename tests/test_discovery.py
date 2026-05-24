@@ -9,6 +9,8 @@ import tests._dbsetup  # noqa: F401  (must precede techhunter imports)
 
 import asyncio
 import sys
+from datetime import datetime, timezone
+from types import SimpleNamespace
 
 from techhunter import config, monitor
 from techhunter.ai.normalize import normalize_device
@@ -303,6 +305,101 @@ async def test_blocked_phone_not_a_deal() -> None:
     check("clean phone not flagged", "icloud_locked" not in clean.defects)
 
 
+async def test_fast_poll_uses_hot_scan_window() -> None:
+    """Fast polling must scan the configured newest-listings window, not only
+    page 1. This is the actual deal-hunting path."""
+
+    calls: list[dict] = []
+
+    class FakeBrowser:
+        def __init__(self) -> None:
+            self.paused = asyncio.Event()
+
+        async def search(self, *args, **kwargs):
+            calls.append({"args": args, "kwargs": kwargs})
+            return []
+
+    now = datetime.now(timezone.utc)
+    default_sub = SimpleNamespace(
+        id=901,
+        tg_id=1,
+        query="iphone",
+        city_slug="rossiya",
+        min_price=None,
+        max_price=None,
+        search_pages=None,
+        onboarded_at=now,
+    )
+    custom_sub = SimpleNamespace(
+        id=902,
+        tg_id=1,
+        query="samsung",
+        city_slug="rossiya",
+        min_price=None,
+        max_price=None,
+        search_pages=2,
+        onboarded_at=now,
+    )
+    discovery_user = SimpleNamespace(
+        tg_id=2,
+        discovery_min_profit_rub=None,
+        discovery_min_profit_ratio=None,
+    )
+
+    async def no_subs():
+        return []
+
+    async def no_discovery():
+        return []
+
+    async def one_default_sub():
+        return [default_sub]
+
+    async def one_custom_sub():
+        return [custom_sub]
+
+    async def one_discovery_user():
+        return [discovery_user]
+
+    orig_active = monitor.active_subscriptions
+    orig_discovery = monitor.discovery_users
+    orig_fast_pages = config.FAST_SCAN_PAGES
+    orig_inprogress = set(monitor._onboard_inprogress)  # noqa: SLF001
+    orig_tasks = set(monitor._onboard_tasks)  # noqa: SLF001
+    try:
+        config.FAST_SCAN_PAGES = 3
+        browser = FakeBrowser()
+
+        monitor.active_subscriptions = one_default_sub  # type: ignore[assignment]
+        monitor.discovery_users = no_discovery  # type: ignore[assignment]
+        await monitor.poll_fast(browser, object())
+        check("subscription default scans hot pages",
+              calls[-1]["kwargs"]["pages"] == 3)
+
+        calls.clear()
+        monitor.active_subscriptions = one_custom_sub  # type: ignore[assignment]
+        await monitor.poll_fast(browser, object())
+        check("subscription custom page count preserved",
+              calls[-1]["kwargs"]["pages"] == 2)
+
+        calls.clear()
+        monitor.active_subscriptions = no_subs  # type: ignore[assignment]
+        monitor.discovery_users = one_discovery_user  # type: ignore[assignment]
+        await monitor.poll_fast(browser, object())
+        check("discovery scans hot pages", calls[-1]["kwargs"]["pages"] == 3)
+    finally:
+        monitor.active_subscriptions = orig_active  # type: ignore[assignment]
+        monitor.discovery_users = orig_discovery  # type: ignore[assignment]
+        config.FAST_SCAN_PAGES = orig_fast_pages
+        new_tasks = monitor._onboard_tasks - orig_tasks  # noqa: SLF001
+        for task in list(new_tasks):
+            task.cancel()
+        monitor._onboard_tasks.clear()  # noqa: SLF001
+        monitor._onboard_tasks.update(orig_tasks)  # noqa: SLF001
+        monitor._onboard_inprogress.clear()  # noqa: SLF001
+        monitor._onboard_inprogress.update(orig_inprogress)  # noqa: SLF001
+
+
 def main() -> None:
     asyncio.run(test_verdict_skip_unrecognized())
     asyncio.run(test_verdict_learn_without_baseline())
@@ -316,6 +413,7 @@ def main() -> None:
     asyncio.run(test_discovery_threshold_controls())
     asyncio.run(test_learned_devices_screen())
     asyncio.run(test_blocked_phone_not_a_deal())
+    asyncio.run(test_fast_poll_uses_hot_scan_window())
     print("\nAll discovery checks passed.")
 
 

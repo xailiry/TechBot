@@ -241,7 +241,7 @@ async def _handle_items(browser, items, target, notifier, sem, cycle_eval, count
 
 
 async def poll_fast(browser, notifier: Notifier) -> None:
-    """Fast loop: check Page 1 of all subs + Discovery."""
+    """Fast loop: check the newest hot window for subs + Discovery."""
     is_paused = browser.paused.is_set()
     runtime.set_captcha(is_paused)
     if is_paused:
@@ -281,7 +281,8 @@ async def poll_fast(browser, notifier: Notifier) -> None:
                     t.add_done_callback(lambda _t, sid=sub.id: _onboard_inprogress.discard(sid))
             
             try:
-                items = await browser.search(sub.query, sub.city_slug, min_price=sub.min_price, max_price=sub.max_price, pages=1, mode="fast")
+                pages = max(1, sub.search_pages or config.FAST_SCAN_PAGES)
+                items = await browser.search(sub.query, sub.city_slug, min_price=sub.min_price, max_price=sub.max_price, pages=pages, mode="fast")
                 counters["scraped"] += len(items)
                 await _handle_items(browser, items, sub, notifier, eval_sem, cycle_eval, counters, runtime_drop, mode="fast")
             except Exception as e:
@@ -291,7 +292,7 @@ async def poll_fast(browser, notifier: Notifier) -> None:
     if d_users:
         deep_budget = {"n": config.DISCOVERY_DEEP_PER_CYCLE}
         try:
-            items = await browser.search(query="", city_slug=config.DISCOVERY_CITY_SLUG, min_price=config.DISCOVERY_MIN_PRICE, pages=1, mode="fast")
+            items = await browser.search(query="", city_slug=config.DISCOVERY_CITY_SLUG, min_price=config.DISCOVERY_MIN_PRICE, pages=config.FAST_SCAN_PAGES, mode="fast")
             counters["scraped"] += len(items)
             for u in d_users:
                 await _handle_items(browser, items, u, notifier, eval_sem, cycle_eval, counters, runtime_drop, mode="fast", deep_budget=deep_budget)

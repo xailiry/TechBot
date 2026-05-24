@@ -143,6 +143,7 @@ DISCOVERY_DEEP_PER_CYCLE=15
 DISCOVERY_MIN_PROFIT_RUB=7000
 DISCOVERY_MIN_PROFIT_RATIO=0.20
 
+FAST_SCAN_PAGES=3
 BROWSER_RESTART_INTERVAL_SEC=600
 ```
 
@@ -152,6 +153,7 @@ BROWSER_RESTART_INTERVAL_SEC=600
 - `DISCOVERY_DEEP_PER_CYCLE` - сколько потенциальных сделок Discovery может открыть за цикл.
 - `DISCOVERY_MIN_PROFIT_RUB` - минимальный профит в рублях.
 - `DISCOVERY_MIN_PROFIT_RATIO` - минимальная маржа.
+- `FAST_SCAN_PAGES` - сколько первых страниц бот смотрит в быстром цикле. По умолчанию `3`: это помогает ловить свежие объявления, которые быстро уехали со страницы 1.
 - `BROWSER_RESTART_INTERVAL_SEC` - как часто перезапускать браузер, чтобы разгружать память.
 
 Больше настроек лежит в `techhunter/config.py`.

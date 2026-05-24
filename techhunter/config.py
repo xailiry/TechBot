@@ -66,8 +66,14 @@ DEEP_WORKERS = int(os.getenv("DEEP_WORKERS", str(max(1, PAGE_POOL_SIZE - FAST_WO
 DEEP_SCAN_INTERVAL_SEC = int(os.getenv("DEEP_SCAN_INTERVAL_SEC", "300"))  # 5 min
 DEEP_SCAN_PAGES = int(os.getenv("DEEP_SCAN_PAGES", "12"))
 
-# Newest-sorted: new lots land on page 1, so 1 page keeps cycles fast.
-DEFAULT_SEARCH_PAGES = int(os.getenv("DEFAULT_SEARCH_PAGES", "1"))
+# Hot scan window. In high-volume categories a listing posted minutes ago can
+# already sit on page 2-3, so the deal hunter checks a small newest-first
+# window every fast cycle. DEFAULT_SEARCH_PAGES is kept as a back-compat env.
+FAST_SCAN_PAGES = max(
+    1,
+    int(os.getenv("FAST_SCAN_PAGES", os.getenv("DEFAULT_SEARCH_PAGES", "3"))),
+)
+DEFAULT_SEARCH_PAGES = FAST_SCAN_PAGES
 
 PAGE_TURN_DELAY_SEC = (
     float(os.getenv("PAGE_TURN_DELAY_MIN", "0.8")),
