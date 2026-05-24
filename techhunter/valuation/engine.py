@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 from .. import config
 from .devices import (
     get_condition_baselines,
+    get_model_working_meta,
     get_or_create_device,
     get_working_meta,
     log_observation,
@@ -91,7 +92,14 @@ async def fast_value_listing(
     if not norm.model:
         return "skip"  # could not even guess what it is
     if norm.storage_gb is None:
-        return "learn"  # storage-specific pricing needs detail params
+        baseline, sample, _variants = await get_model_working_meta(
+            norm.brand, norm.model
+        )
+        if baseline is None or sample < config.BASELINE_MIN_SAMPLE:
+            return "learn"
+        market = baseline * (1 - config.PROFIT_HAGGLE_PERCENT)
+        limit = market * config.FAST_VALUATION_THRESHOLD_PCT
+        return "deal" if (item.price > 0 and item.price < limit) else "skip"
 
     device_id = await get_or_create_device(
         norm.brand, norm.model, norm.storage_gb, norm.ram_gb

@@ -274,6 +274,39 @@ async def get_working_meta(device_id: int) -> tuple[int | None, int, float]:
     return price, int(row.sample_size or 0), _age_seconds(row.updated_at)
 
 
+async def get_model_working_meta(
+    brand: str, model: str
+) -> tuple[int | None, int, int]:
+    """Aggregate working baseline for card triage when storage is absent.
+
+    This is deliberately computed, not stored as a fake storage-less device:
+    exact storage baselines remain the source of truth for final valuation.
+    Returns (median_of_variant_medians, total_sample, variant_count).
+    """
+    async with get_session() as s:
+        rows = (
+            await s.execute(
+                select(
+                    MarketBaseline.median_price,
+                    MarketBaseline.sample_size,
+                )
+                .join(DeviceCatalog, DeviceCatalog.id == MarketBaseline.device_id)
+                .where(
+                    DeviceCatalog.brand == brand,
+                    DeviceCatalog.model == model,
+                    DeviceCatalog.storage_gb.is_not(None),
+                    MarketBaseline.condition == WORKING_CONDITION,
+                    MarketBaseline.sample_size >= config.BASELINE_MIN_SAMPLE,
+                )
+            )
+        ).all()
+    if not rows:
+        return None, 0, 0
+    prices = [int(price) for price, _sample in rows]
+    sample = sum(int(sample or 0) for _price, sample in rows)
+    return robust_median(prices, drop_low_cluster=False), sample, len(rows)
+
+
 async def get_condition_baselines(device_id: int) -> dict[str, int]:
     """All learned tier medians for display: {'good': X, 'broken': Y, ...}."""
     async with get_session() as s:

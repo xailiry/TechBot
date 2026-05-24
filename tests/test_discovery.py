@@ -14,7 +14,11 @@ from techhunter import config, monitor
 from techhunter.ai.normalize import normalize_device
 from techhunter.ai.specs import extract_specs
 from techhunter.scraper.models import ParsedListing
-from techhunter.valuation.devices import get_or_create_device, set_manual_baseline
+from techhunter.valuation.devices import (
+    get_model_working_meta,
+    get_or_create_device,
+    set_manual_baseline,
+)
 from techhunter.valuation.engine import fast_value_listing
 
 
@@ -58,13 +62,23 @@ async def test_verdict_learn_without_baseline() -> None:
     check("no baseline + subscription -> learn", v2 == "learn")
 
 
-async def test_verdict_learn_without_storage() -> None:
+async def test_verdict_uses_model_fallback_without_storage() -> None:
     title = "iPhone 14 Pro"
     dev_id = await _resolve_device("iPhone 14 Pro 256GB")
     await set_manual_baseline(dev_id, 70000)
-    v = await fast_value_listing(_item("d2c", title, 45000),
-                                 is_discovery=True)
-    check("no storage -> learn/detail", v == "learn")
+    base, sample, variants = await get_model_working_meta("apple", title)
+    check("model fallback exists",
+          base == 70000 and sample >= config.BASELINE_MIN_SAMPLE
+          and variants == 1)
+    cheap = await fast_value_listing(_item("d2c", title, 45000),
+                                     is_discovery=True)
+    check("no storage cheap -> deal/detail", cheap == "deal")
+    pricey = await fast_value_listing(_item("d2d", title, 65000),
+                                      is_discovery=True)
+    check("no storage pricey -> skip", pricey == "skip")
+    unknown = await fast_value_listing(_item("d2e", "Pixel 9 Pro", 50000),
+                                       is_discovery=True)
+    check("no storage no fallback -> learn/detail", unknown == "learn")
 
 
 async def test_verdict_deal_vs_skip_with_baseline() -> None:
@@ -292,7 +306,7 @@ async def test_blocked_phone_not_a_deal() -> None:
 def main() -> None:
     asyncio.run(test_verdict_skip_unrecognized())
     asyncio.run(test_verdict_learn_without_baseline())
-    asyncio.run(test_verdict_learn_without_storage())
+    asyncio.run(test_verdict_uses_model_fallback_without_storage())
     asyncio.run(test_verdict_deal_vs_skip_with_baseline())
     asyncio.run(test_learn_uses_card_not_detail())
     asyncio.run(test_storage_missing_opens_detail_for_learning())
