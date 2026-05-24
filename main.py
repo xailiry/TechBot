@@ -1,13 +1,15 @@
 """TechHunter Bot entrypoint: runs the Telegram bot and the Avito monitor
 concurrently. Schema is managed by Alembic migrations."""
 import asyncio
+import contextlib
 import logging
+import sys
 
 from aiogram.exceptions import TelegramNetworkError
 
 from techhunter.bot.app import build_bot
 from techhunter.bot.notifier import TelegramNotifier
-from techhunter.config import require_bot_token
+from techhunter.config import DATA_DIR, require_bot_token
 from techhunter.db import dispose_engine
 from techhunter.logging_config import setup_logging
 from techhunter.monitor import run_forever
@@ -20,6 +22,36 @@ log = logging.getLogger("techhunter.main")
 # and drag the Avito monitor down with it, so each half runs under its own
 # supervisor and is restarted after a short pause.
 RETRY_SEC = 15
+
+
+@contextlib.contextmanager
+def _single_instance_lock():
+    """Keep one bot process per workspace.
+
+    The visible browser uses one persistent Chrome profile; two bot processes
+    fighting for it make Playwright fail with a noisy TargetClosedError.
+    """
+    lock_path = DATA_DIR / "techhunter.lock"
+    lock_file = lock_path.open("a+b")
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+
+            try:
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError as e:
+                raise RuntimeError("TechHunter Bot is already running.") from e
+        else:
+            import fcntl
+
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as e:
+                raise RuntimeError("TechHunter Bot is already running.") from e
+        yield
+    finally:
+        with contextlib.suppress(Exception):
+            lock_file.close()
 
 
 async def _supervise(name: str, factory) -> None:
@@ -63,6 +95,9 @@ async def _main() -> None:
 
 if __name__ == "__main__":
     try:
-        asyncio.run(_main())
+        with _single_instance_lock():
+            asyncio.run(_main())
+    except RuntimeError as e:
+        print(e)
     except KeyboardInterrupt:
         pass
