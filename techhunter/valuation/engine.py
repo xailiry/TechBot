@@ -67,6 +67,22 @@ def _is_price_badge_teaching_safe(item: "ParsedListing") -> bool:
     return getattr(item, "avito_price_badge", None) not in {"below", "above"}
 
 
+def _learning_text(item: "ParsedListing") -> str:
+    return " ".join(
+        p for p in (item.description, getattr(item, "snippet", "")) if p
+    )
+
+
+def _learning_shoplike(item: "ParsedListing") -> bool:
+    return looks_shoplike(
+        item.title,
+        _learning_text(item),
+        item.seller_type,
+        item.seller_listings,
+        item.seller_reviews,
+    )
+
+
 class Valuation(BaseModel):
     listing_id: str
     device_key: str | None = None
@@ -152,51 +168,108 @@ async def fast_value_listing(
     return "deal" if (item.price > 0 and item.price < limit) else "skip"
 
 
-async def learn_from_card(item: "ParsedListing", source: str = "card") -> bool:
+async def learn_from_card_device(
+    item: "ParsedListing", source: str = "card"
+) -> int | None:
     """Card-only price learning: grade condition from the title and log a real
     observation WITHOUT opening the listing detail page. Cheap and calm (no
     browser navigation), so Discovery can learn the whole category fast.
-    Returns True if an observation was logged."""
+    Returns the device id if an observation was logged."""
     from ..ai.normalize import normalize_device
     from ..ai.specs import extract_specs
     from ..ai.condition import grade_condition
-    from .scam import looks_shoplike
 
-    specs = extract_specs(item.title, item.description, item.params)
+    card_text = _learning_text(item)
+    specs = extract_specs(item.title, card_text, item.params)
     norm = normalize_device(
-        item.title, storage_gb=specs.storage_gb, ram_gb=specs.ram_gb
+        item.title,
+        description=card_text,
+        storage_gb=specs.storage_gb,
+        ram_gb=specs.ram_gb,
+        params=item.params,
     )
     if not norm.model:
-        return False
+        return None
     if norm.storage_gb is None:
-        return False
+        return None
     if requires_detail_learning(norm.brand, norm.model):
-        return False
+        return None
     if specs.is_new:
-        return False  # never learn the used market from sealed/new lots
+        return None  # never learn the used market from sealed/new lots
     if not _is_price_badge_teaching_safe(item):
-        return False
-    # Only title-level shop signals are visible before the detail page; enough
-    # to drop the obvious resellers from the learned median.
-    if looks_shoplike(
-        item.title,
-        item.description,
-        item.seller_type,
-        item.seller_listings,
-        item.seller_reviews,
-    ):
-        return False
+        return None
+    if _learning_shoplike(item):
+        return None
     device_id = await get_or_create_device(
         norm.brand, norm.model, norm.storage_gb, norm.ram_gb
     )
     if device_id is None:
-        return False
-    cond = grade_condition(specs, item.title).value
-    return await log_observation(
+        return None
+    cond = grade_condition(specs, f"{item.title} {card_text}").value
+    ok = await log_observation(
         device_id, cond, item.price,
         listing_id=item.id, raw_title=item.title, storage_gb=norm.storage_gb,
         source=source
     )
+    return device_id if ok else None
+
+
+async def learn_from_card(item: "ParsedListing", source: str = "card") -> bool:
+    """Backward-compatible bool wrapper for card-only learning."""
+    return await learn_from_card_device(item, source=source) is not None
+
+
+def should_fetch_detail_for_learning(item: "ParsedListing") -> bool:
+    """Whether training should spend a detail fetch to learn this card.
+
+    Detail learning is reserved for cards where the search result is not
+    trustworthy enough: missing storage or fresh Apple models. Obvious shop /
+    extreme Avito price badges / new sealed cards are skipped without opening.
+    """
+    from ..ai.normalize import normalize_device
+    from ..ai.specs import extract_specs
+
+    if not _is_price_badge_teaching_safe(item):
+        return False
+    card_text = _learning_text(item)
+    specs = extract_specs(item.title, card_text, item.params)
+    norm = normalize_device(
+        item.title,
+        description=card_text,
+        storage_gb=specs.storage_gb,
+        ram_gb=specs.ram_gb,
+        params=item.params,
+    )
+    if not norm.model or specs.is_new or _learning_shoplike(item):
+        return False
+    return norm.storage_gb is None or requires_detail_learning(norm.brand, norm.model)
+
+
+async def learn_from_detail(
+    item: "ParsedListing", report: "EvaluationReport", source: str = "detail"
+) -> int | None:
+    """Learn from an already fetched/evaluated detail page."""
+    if (
+        report.is_new
+        or not _is_price_badge_teaching_safe(item)
+        or _learning_shoplike(item)
+    ):
+        return None
+    device_id = await get_or_create_device(
+        report.brand, report.model or "", report.storage_gb, report.ram_gb
+    )
+    if device_id is None or report.storage_gb is None:
+        return None
+    ok = await log_observation(
+        device_id,
+        report.condition,
+        item.price,
+        listing_id=item.id,
+        raw_title=item.title,
+        storage_gb=report.storage_gb,
+        source=source,
+    )
+    return device_id if ok else None
 
 
 async def value_listing(
@@ -220,10 +293,7 @@ async def value_listing(
         # sealed/new and shop/retail so medians reflect the real used
         # market, not inflated store prices. Absolute junk is dropped in
         # log_observation.
-        v.shoplike = looks_shoplike(
-            item.title, item.description,
-            item.seller_type, item.seller_listings, item.seller_reviews,
-        )
+        v.shoplike = _learning_shoplike(item)
         if (
             log_obs
             and not report.is_new

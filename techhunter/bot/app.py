@@ -233,10 +233,9 @@ async def cmd_train_stat(msg: Message) -> None:
         from sqlalchemy import text
         
         async with async_session_factory() as session:
-            # How many items were learned during training (source='training')
-            res = await session.execute(text("SELECT count(*) FROM price_observations WHERE source='training'"))
+            # How many items were learned during training.
+            res = await session.execute(text("SELECT count(*) FROM price_observations WHERE source IN ('training', 'training_detail')"))
             obs_count = res.scalar() or 0
-            
             res = await session.execute(text("SELECT count(*) FROM device_catalog"))
             dev_count = res.scalar() or 0
             

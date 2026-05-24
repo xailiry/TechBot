@@ -53,6 +53,9 @@ _SHOP = [
     re.compile(r"\bбольш[оией]+\s*выбор\b", re.I),
     re.compile(r"\bнаш[аи]?\s*магазин\b", re.I),
 ]
+_EMOJI_RE = re.compile(
+    r"[\U0001F300-\U0001FAFF\U00002700-\U000027BF\U00002600-\U000026FF]"
+)
 _ICLOUD = re.compile(
     r"icloud|айклауд|activation lock|залочен|привязан\w*\s*к|frp", re.I
 )
@@ -71,6 +74,14 @@ class ScamScore:
 
 def _any(text: str, pats: list[re.Pattern]) -> bool:
     return any(p.search(text) for p in pats)
+
+
+def _emoji_spam(text: str) -> bool:
+    emojis = _EMOJI_RE.findall(text or "")
+    if len(emojis) >= 4:
+        return True
+    compact_len = max(1, len((text or "").replace(" ", "")))
+    return len(emojis) >= 3 and (len(emojis) / compact_len) >= 0.02
 
 
 # Extra retail/refurb markers that inflate or distort the USED baseline.
@@ -116,6 +127,7 @@ def looks_shoplike(
         _any(shop_text, _SHOP)
         or _any(shop_text, _RETAIL)
         or bool(_REFURB.search(shop_text))
+        or _emoji_spam(shop_text)
     )
 
 

@@ -81,6 +81,8 @@ def test_shoplike() -> None:
           not looks_shoplike("iPhone 15 Pro", "не реф, не восстановленный"))
     check("rassrochka/trade-in",
           looks_shoplike("iPhone 15 Pro", "рассрочка, trade-in, выкуп"))
+    check("emoji-heavy text",
+          looks_shoplike("iPhone 15 Pro", "🔥🔥🔥✅✅ лучший выбор, гарантия"))
     check("seller_type shop",
           looks_shoplike("iPhone 15 Pro", "", seller_type="shop"))
     check("many listings",

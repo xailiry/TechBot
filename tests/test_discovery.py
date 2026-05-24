@@ -21,7 +21,12 @@ from techhunter.valuation.devices import (
     get_or_create_device,
     set_manual_baseline,
 )
-from techhunter.valuation.engine import fast_value_listing, learn_from_card
+from techhunter.valuation.engine import (
+    fast_value_listing,
+    learn_from_card,
+    learn_from_detail,
+    should_fetch_detail_for_learning,
+)
 
 
 def check(name: str, cond: bool) -> None:
@@ -156,6 +161,36 @@ async def test_extreme_avito_badges_do_not_teach_baseline() -> None:
     learned = await learn_from_card(item)
     prices = await _prices(dev_id, ("ideal", "good"))
     check("below-market badge not learned", learned is False and 18000 not in prices)
+
+
+async def test_training_skips_emoji_shop_cards() -> None:
+    from techhunter.valuation.devices import _prices  # noqa: PLC2701
+
+    title = "Honor 90 256GB"
+    dev_id = await _resolve_device(title)
+    item = _item("d7-emoji", title, 21000)
+    item.snippet = "🔥🔥🔥✅✅ гарантия, рассрочка, большой выбор"
+
+    learned = await learn_from_card(item, source="training")
+    prices = await _prices(dev_id, ("ideal", "good"))
+    check("emoji/shop card not learned", learned is False and 21000 not in prices)
+
+
+async def test_training_detail_learning_for_fresh_iphone() -> None:
+    from techhunter.ai.evaluate import evaluate_listing
+    from techhunter.valuation.devices import _prices  # noqa: PLC2701
+
+    item = _item("d17-detail", "iPhone 17 Pro 256GB", 87000)
+    check("fresh iPhone selected for detail learning",
+          should_fetch_detail_for_learning(item) is True)
+
+    item.description = "Used phone, battery health 98%, everything works."
+    item.params = {"встроенная память": "256 ГБ"}
+    rep = await evaluate_listing(item, run_clip=False, do_dedup=False)
+    did = await learn_from_detail(item, rep, source="training_detail")
+    prices = await _prices(did, ("ideal", "good")) if did else []
+    check("fresh iPhone detail observation logged",
+          did is not None and 87000 in prices)
 
 
 async def test_fresh_iphone_learning_opens_detail() -> None:
@@ -461,6 +496,8 @@ def main() -> None:
     asyncio.run(test_iphone_16e_does_not_use_iphone_16_baseline())
     asyncio.run(test_learn_uses_card_not_detail())
     asyncio.run(test_extreme_avito_badges_do_not_teach_baseline())
+    asyncio.run(test_training_skips_emoji_shop_cards())
+    asyncio.run(test_training_detail_learning_for_fresh_iphone())
     asyncio.run(test_fresh_iphone_learning_opens_detail())
     asyncio.run(test_storage_missing_opens_detail_for_learning())
     asyncio.run(test_deal_budget_defers())

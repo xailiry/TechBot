@@ -178,6 +178,16 @@ DISCOVERY_MIN_PRICE = int(os.getenv("DISCOVERY_MIN_PRICE", "5000"))
 # cannot trigger a flood of detail fetches (captcha/IP-ban protection).
 DISCOVERY_DEEP_PER_CYCLE = int(os.getenv("DISCOVERY_DEEP_PER_CYCLE", "15"))
 
+# Broad market-learning crawl. Card learning is cheap, but some cards are too
+# weak/noisy (missing storage or fresh Apple models), so training may open a
+# small bounded number of detail pages per search page.
+TRAINING_MAX_PAGES = int(os.getenv("TRAINING_MAX_PAGES", "120"))
+TRAINING_MIN_PRICE = int(os.getenv("TRAINING_MIN_PRICE", str(DISCOVERY_MIN_PRICE)))
+TRAINING_DETAIL_PER_PAGE = int(os.getenv("TRAINING_DETAIL_PER_PAGE", "8"))
+TRAINING_SEEN_CACHE = int(os.getenv("TRAINING_SEEN_CACHE", "5000"))
+TRAINING_PAGE_DELAY_MIN_SEC = float(os.getenv("TRAINING_PAGE_DELAY_MIN_SEC", "10.0"))
+TRAINING_PAGE_DELAY_MAX_SEC = float(os.getenv("TRAINING_PAGE_DELAY_MAX_SEC", "20.0"))
+
 # Baselines are learned from real observations only and keep adapting
 # forever (never locked). Per-condition tiers learn separately.
 BASELINE_MIN_SAMPLE = int(os.getenv("BASELINE_MIN_SAMPLE", "12"))

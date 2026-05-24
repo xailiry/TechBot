@@ -411,12 +411,17 @@ async def run_forever(notifier: Notifier | None = None) -> None:
 
     async def training_loop():
         import random
+        from collections import deque
+
         current_page = 1
-        max_pages = 120
+        seen_order: deque[str] = deque()
+        seen_ids: set[str] = set()
         
         while True:
             if not runtime.is_training_mode():
                 current_page = 1
+                seen_order.clear()
+                seen_ids.clear()
                 await asyncio.sleep(5)
                 continue
             
@@ -426,11 +431,12 @@ async def run_forever(notifier: Notifier | None = None) -> None:
                 continue
                 
             try:
+                max_pages = config.TRAINING_MAX_PAGES
                 log.info("Training Mode: scanning page %d of %d...", current_page, max_pages)
                 items = await browser.search(
                     query="",
                     city_slug="rossiya",
-                    min_price=5000,
+                    min_price=config.TRAINING_MIN_PRICE,
                     pages=1,
                     start_page=current_page,
                     mode="deep"
@@ -442,20 +448,85 @@ async def run_forever(notifier: Notifier | None = None) -> None:
                     await asyncio.sleep(15)
                     continue
                 
-                log.info("Training Mode: Found %d items on page %d. Logging prices...", len(items), current_page)
-                from .valuation.engine import learn_from_card
-                processed = 0
+                log.info("Training Mode: found %d items on page %d.", len(items), current_page)
+                from .valuation.engine import (
+                    learn_from_card_device,
+                    learn_from_detail,
+                    should_fetch_detail_for_learning,
+                )
+                card_learned = 0
+                detail_learned = 0
+                skipped = 0
+                detail_used = 0
+                device_ids: set[int] = set()
                 for item in items:
                     # Let the event loop breathe between database writes
                     await asyncio.sleep(0.02)
                     if not runtime.is_training_mode():
                         break
-                    
-                    if await learn_from_card(item, source="training"):
-                        processed += 1
+
+                    if item.id in seen_ids:
+                        skipped += 1
+                        continue
+                    seen_ids.add(item.id)
+                    seen_order.append(item.id)
+                    while len(seen_order) > config.TRAINING_SEEN_CACHE:
+                        old = seen_order.popleft()
+                        seen_ids.discard(old)
+
+                    did = await learn_from_card_device(item, source="training")
+                    if did is not None:
+                        card_learned += 1
+                        device_ids.add(did)
+                        continue
+
+                    if (
+                        detail_used >= config.TRAINING_DETAIL_PER_PAGE
+                        or not should_fetch_detail_for_learning(item)
+                    ):
+                        skipped += 1
+                        continue
+
+                    detail_used += 1
+                    try:
+                        detail_item = await browser.fetch_details(item)
+                        rep = await evaluate_listing(
+                            detail_item, run_clip=False, do_dedup=False
+                        )
+                        did = await learn_from_detail(
+                            detail_item, rep, source="training_detail"
+                        )
+                    except Exception as e:
+                        log.debug("Training detail learn failed for %s: %s", item.id, e)
+                        did = None
+                    if did is not None:
+                        detail_learned += 1
+                        device_ids.add(did)
+                    else:
+                        skipped += 1
+
+                for did in device_ids:
+                    with contextlib.suppress(Exception):
+                        await relearn(did)
                 
-                log.info("Training Mode: Page %d finished. Logged %d observations.", current_page, processed)
-                runtime.update_cycle(subs=0, scraped=len(items), processed=processed, cached=0, errors=0, deals=0, filtered=0, drop_reasons={})
+                processed = card_learned + detail_learned
+                log.info(
+                    "Training Mode: page %d finished. card=%d detail=%d skipped=%d devices=%d.",
+                    current_page, card_learned, detail_learned, skipped, len(device_ids),
+                )
+                runtime.update_cycle(
+                    subs=0,
+                    scraped=len(items),
+                    processed=processed,
+                    cached=0,
+                    errors=0,
+                    deals=0,
+                    filtered=skipped,
+                    drop_reasons={
+                        "training_detail": detail_learned,
+                        "training_skipped": skipped,
+                    },
+                )
                 
                 # Increment page number
                 current_page += 1
@@ -464,7 +535,10 @@ async def run_forever(notifier: Notifier | None = None) -> None:
                     current_page = 1
                 
                 # Delay between pages to stagger requests and let telegram bot poll smoothly
-                await asyncio.sleep(random.uniform(10.0, 20.0))
+                await asyncio.sleep(random.uniform(
+                    config.TRAINING_PAGE_DELAY_MIN_SEC,
+                    config.TRAINING_PAGE_DELAY_MAX_SEC,
+                ))
                 
             except Exception as e:
                 log.error("Training loop error: %s", e)
