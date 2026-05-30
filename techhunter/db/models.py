@@ -27,6 +27,7 @@ class User(Base):
     tg_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     username: Mapped[str | None] = mapped_column(String(64))
     paused: Mapped[bool] = mapped_column(Integer, default=0)
+    is_approved: Mapped[bool] = mapped_column(Integer, default=0, server_default="0")
     # Per-user delivery filters (M1).
     # Minimum scam/trust score to deliver (0 = off).
     min_score: Mapped[int] = mapped_column(

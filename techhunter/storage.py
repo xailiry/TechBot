@@ -41,6 +41,19 @@ async def upsert_user(tg_id: int, username: str | None = None) -> None:
         await s.execute(stmt)
 
 
+async def set_approved(tg_id: int, approved: bool) -> None:
+    async with get_session() as s:
+        u = await s.get(User, tg_id)
+        if u:
+            u.is_approved = approved
+
+
+async def is_user_approved(tg_id: int) -> bool:
+    async with get_session() as s:
+        u = await s.get(User, tg_id)
+        return bool(u and u.is_approved)
+
+
 async def add_subscription(
     tg_id: int,
     query: str,

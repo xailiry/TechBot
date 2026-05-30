@@ -3,9 +3,9 @@ guided add, per-user delivery filters. Commands remain as shortcuts."""
 import contextlib
 import logging
 
-from aiogram import Bot, Dispatcher, F
+from aiogram import BaseMiddleware, Bot, Dispatcher, F
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.filters import Command, CommandStart, StateFilter
+from aiogram.filters import BaseFilter, Command, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
@@ -13,6 +13,7 @@ from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
+    TelegramObject,
 )
 
 from .. import config
@@ -20,8 +21,10 @@ from ..storage import (
     add_subscription,
     feedback_features,
     get_card_state,
+    is_user_approved,
     record_feedback,
     remove_subscription,
+    set_approved,
     set_exclude_shop,
     set_min_score,
     set_paused,
@@ -62,6 +65,37 @@ FEEDBACK_REASONS: tuple[tuple[str, str], ...] = (
     ("duplicate", "дубль / уже видел"),
     ("other", "другое"),
 )
+
+
+class AdminFilter(BaseFilter):
+    async def __call__(self, event: TelegramObject) -> bool:
+        user = getattr(event, "from_user", None)
+        return bool(user and user.id in config.ADMIN_USER_IDS)
+
+
+class AccessMiddleware(BaseMiddleware):
+    async def __call__(self, handler, event, data):
+        user = getattr(event, "from_user", None)
+        if not user:
+            return await handler(event, data)
+        
+        # 1. Admins bypass everything.
+        if user.id in config.ADMIN_USER_IDS:
+            return await handler(event, data)
+        
+        # 2. Approved users pass.
+        if await is_user_approved(user.id):
+            return await handler(event, data)
+        
+        # 3. Deny others.
+        if isinstance(event, Message):
+            await event.answer("⛔ У вас нет доступа к этому боту.")
+        elif isinstance(event, CallbackQuery):
+            await event.answer("⛔ Нет доступа", show_alert=True)
+        return
+
+dp.message.middleware(AccessMiddleware())
+dp.callback_query.middleware(AccessMiddleware())
 
 
 class AddSub(StatesGroup):
@@ -135,7 +169,7 @@ async def cmd_status(msg: Message) -> None:
     await msg.answer(text, parse_mode="HTML", reply_markup=kb)
 
 
-@dp.message(Command("dev"))
+@dp.message(Command("dev"), AdminFilter())
 async def cmd_dev(msg: Message) -> None:
     text, kb = await screen_dev()
     await msg.answer(text, parse_mode="HTML", reply_markup=kb)
@@ -148,13 +182,36 @@ async def cmd_quality(msg: Message) -> None:
     await msg.answer(text, parse_mode="HTML", reply_markup=kb)
 
 
-@dp.message(Command("retry_pending"))
+@dp.message(Command("retry_pending"), AdminFilter())
 async def cmd_retry_pending(msg: Message) -> None:
     from ..monitor import _retry_pending_alerts
     from .notifier import TelegramNotifier
 
     sent = await _retry_pending_alerts(TelegramNotifier(msg.bot))
     await msg.answer(f"🔁 Outbox retry: отправлено {sent}.")
+
+
+@dp.message(Command("allow"), AdminFilter())
+async def cmd_allow(msg: Message) -> None:
+    args = (msg.text or "").split()
+    if len(args) < 2 or not args[1].isdigit():
+        await msg.answer("Использование: <code>/allow 12345678</code>", parse_mode="HTML")
+        return
+    tg_id = int(args[1])
+    await upsert_user(tg_id, f"approved_{tg_id}")
+    await set_approved(tg_id, True)
+    await msg.answer(f"✅ Пользователь <code>{tg_id}</code> получил доступ к боту.", parse_mode="HTML")
+
+
+@dp.message(Command("revoke"), AdminFilter())
+async def cmd_revoke(msg: Message) -> None:
+    args = (msg.text or "").split()
+    if len(args) < 2 or not args[1].isdigit():
+        await msg.answer("Использование: <code>/revoke 12345678</code>", parse_mode="HTML")
+        return
+    tg_id = int(args[1])
+    await set_approved(tg_id, False)
+    await msg.answer(f"❌ Доступ пользователя <code>{tg_id}</code> отозван.", parse_mode="HTML")
 
 
 async def _save_subscription(tg_id: int, body: str) -> str | None:
@@ -262,7 +319,7 @@ async def cmd_discovery_ratio(msg: Message) -> None:
 
 # ─── Training Mode ──────────────────────────────────────────────────────────
 
-@dp.message(Command("train_start"))
+@dp.message(Command("train_start"), AdminFilter())
 async def cmd_train_start(msg: Message) -> None:
     from .. import runtime
     
@@ -277,7 +334,7 @@ async def cmd_train_start(msg: Message) -> None:
         await msg.answer(f"❌ Ошибка запуска: {e}")
 
 
-@dp.message(Command("train_stop"))
+@dp.message(Command("train_stop"), AdminFilter())
 async def cmd_train_stop(msg: Message) -> None:
     from .. import runtime
     
@@ -289,7 +346,7 @@ async def cmd_train_stop(msg: Message) -> None:
     await msg.answer("🛑 <b>Режим обучения остановлен.</b>\nОбычная работа монитора восстановлена.", parse_mode="HTML")
 
 
-@dp.message(Command("train_stat"))
+@dp.message(Command("train_stat"), AdminFilter())
 async def cmd_train_stat(msg: Message) -> None:
     try:
         from .. import runtime
@@ -449,19 +506,19 @@ async def cb_discovery(cb: CallbackQuery) -> None:
     await _edit(cb, await screen_discovery(cb.from_user.id))
 
 
-@dp.callback_query(F.data == "dev:raw")
+@dp.callback_query(F.data == "dev:raw", AdminFilter())
 async def cb_dev_raw(cb: CallbackQuery) -> None:
     await _edit(cb, await screen_dev(raw=True))
 
 
-@dp.callback_query(F.data.startswith("dev:confirm:"))
+@dp.callback_query(F.data.startswith("dev:confirm:"), AdminFilter())
 async def cb_dev_confirm(cb: CallbackQuery) -> None:
     await _answer_cb(cb)
     action = cb.data.split(":", 2)[2]
     await _edit(cb, screen_dev_confirm(action))
 
 
-@dp.callback_query(F.data.startswith("dev:run:"))
+@dp.callback_query(F.data.startswith("dev:run:"), AdminFilter())
 async def cb_dev_run(cb: CallbackQuery) -> None:
     await _answer_cb(cb, "Запускаю")
     action = cb.data.split(":", 2)[2]
