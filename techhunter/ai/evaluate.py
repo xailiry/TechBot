@@ -73,9 +73,12 @@ async def evaluate_listing(
         params=item.params,
     )
 
-    # 1. Reprogrammed battery check (health >= 95% at cycles >= 250)
+    # 1. Reprogrammed battery check using a dynamic wear curve
     if specs.battery_health is not None and getattr(specs, "battery_cycles", None) is not None:
-        if specs.battery_health >= 95 and specs.battery_cycles >= 250:
+        # Lithium-ion batteries drop ~1% health per 25-30 cycles
+        expected_health = max(50, 100 - (specs.battery_cycles / 30))
+        # If health is significantly higher than physically possible (+5% margin), flag it
+        if specs.battery_health > expected_health + 5:
             specs.defects.add("battery_replaced")
 
     # 2. Old used iPhones with 100% battery usually have a replaced or

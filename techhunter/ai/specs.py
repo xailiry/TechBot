@@ -26,10 +26,10 @@ from ..textnorm import normalize_homoglyphs
 # --- battery health ---------------------------------------------------------
 _BAT_WORD = r"(?:акб|аккумулятор[а-я]*|батаре[ияй]|battery(?:\s*health)?|ё?мкост[ьи](?:\s*акб)?)"
 _BAT_AFTER = re.compile(_BAT_WORD + r"[^0-9%]{0,12}(\d{1,3})\s*%?", re.I)
-_BAT_BEFORE = re.compile(r"(\d{1,3})\s*%[^0-9]{0,12}" + _BAT_WORD, re.I)
+_BAT_BEFORE = re.compile(r"(\d{1,3})\s*%[^0-9]{0,5}" + _BAT_WORD, re.I)
 
 _CYCLES_RE = re.compile(
-    r"(?:цикл\w*|заряд\w*|cycle\w*|зарядок\b)[^\d]{0,10}(\d{1,4})|(\d{1,4})\s*(?:цикл\w*|заряд\w*|cycle\w*|зарядок\b)",
+    r"(?:цикл\w*|cycle\w*|зарядок\b)[^\d]{0,10}(\d{1,4})|(\d{1,4})\s*(?:цикл\w*|cycle\w*|зарядок\b)",
     re.I,
 )
 
@@ -100,12 +100,7 @@ _DEFECT_PATTERNS: list[tuple[str, str]] = [
     (r"выгор\w*\s*экран|экран\s*выгор|пятн[оа]\s*на\s*экран|выгоревш\w*\s*пиксел", "screen_replaced"),
     (r"реф\b|рефаб|refurb|восстановл\w*|восстановк|неоригинал|не\s*родн\w*\s*запчаст",
      "not_original_parts"),
-    (r"копи[яйи]\b|реплик|1\s*[:в]\s*1|люкс\s*копи|fake\b|подделк", "replica"),
-    # Wear words are guarded against negation ("без царапин", "нет сколов")
-    # so a clean lot is not falsely downgraded. Calibrated in Stage 5.
-    (r"(?<!без )(?<!нет )(?:царапин|потертост|потёртост|скол\w*|вмятин)|"
-     r"сост\w*\s*на\s*фото|есть\s*нюанс|по\s*состоян\w*\s*нюанс|"
-     r"трещин(?!\w*\s*экран)", "cosmetic_wear"),
+    (r"копи[яйи]\b|реплик|1\s*[:в]\s*1|люкс\s*копи|fake\b|подделк|паль\b|закос\b|муляж\b", "replica"),
 ]
 
 _DEFECT_RE = [(re.compile(p, re.I), code) for p, code in _DEFECT_PATTERNS]
@@ -118,6 +113,10 @@ _NEG_CLEAN = re.compile(
     r"|\bне\s+(?:разб\w+|треснут\w+|бит\w+|колот\w+)"
     r"|\bбез\s+(?:r[\s\-]?sim|р[\s\-]?сим|mdm|мдм|сим[\s\-]?лок|sim[\s\-]?lock|чип\w*|обход\w*)\b"
     r"|\bне\s+(?:залочен\w*|заблокирован\w*)"
+    r"|\bне\s+(?:реф\b|рефаб|восстановл\w*)"
+    r"|\bне\s+(?:копи\w*|реплик\w*|подделк\w*)"
+    r"|\bбез\s+(?:царапин\w*|сколов|дефектов|нюансов)\b"
+    r"|\b(?:царапин|сколов|дефектов|нюансов)\s+нет\b"
     r"|\b(?:нет|без|никаких)\s+проблем\w*"
     r"|\b(?:нет|без|никаких)\s+(?:полос\w*|бит\w*\s*пиксел\w*)"
     r"(?:\s*(?:и|,)\s*(?:полос\w*|бит\w*\s*пиксел\w*))*"
@@ -265,9 +264,14 @@ def extract_specs(
 
 
 
+    earliest_idx = -1
+    best_color = None
     for word, norm in _COLOR_KEYWORDS.items():
-        if word in text:
-            specs.color = norm
-            break
+        idx = text.find(word)
+        if idx != -1:
+            if earliest_idx == -1 or idx < earliest_idx:
+                earliest_idx = idx
+                best_color = norm
+    specs.color = best_color
 
     return specs

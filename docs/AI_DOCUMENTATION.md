@@ -34,20 +34,25 @@ TechHunter_Bot/
     ├── __init__.py
     ├── config.py               # Complete project configuration loaded from env/defaults
     ├── logging_config.py       # Global logging setup
-    ├── monitor.py              # Scrape loop, crawler orchestration, and watchdog
-    ├── monitor_logic.py        # Isolated monitor step functions
+    ├── monitor.py              # Main entrypoint wrapper for the monitoring system
+    ├── monitoring/             # Monitoring lifecycle managers
+    │   ├── poller.py           # Core scrape loop, orchestration, and worker pools
+    │   ├── training.py         # Baseline onboarding and continuous learning
+    │   └── maintenance.py      # Background tasks (retention cleanup, etc.)
     ├── pipeline.py             # Single listing valuation processing pipeline
     ├── delivery.py             # Per-user filter checking
-    ├── storage.py              # High-performance async database helpers
+    ├── storage.py              # Legacy async database helpers (being phased out)
     ├── textnorm.py             # Shared homoglyph normalization & similarity check
     ├── runtime.py              # In-memory status snapshot of the scraper cycle
     ├── notifier.py             # Notifier interfaces (Console + Telegram)
     ├── db/                     # DB session, base class, and models
     │   ├── base.py
     │   ├── session.py          # SQLite WAL tuning & session factory
-    │   └── models.py           # Database tables
+    │   ├── models.py           # Database tables
+    │   └── repository.py       # Modern data access layer (Repository Pattern)
     ├── scraper/                # Web scraping and Avito parser
-    │   ├── browser.py          # Playwright resilience, tab pool, captcha gating
+    │   ├── session.py          # Global state management for Captcha / scraping locks
+    │   ├── browser.py          # Playwright resilience, tab pool, context recycling
     │   ├── parser.py           # BeautifulSoup4 data extraction
     │   ├── stealth.py          # Playwright-stealth signatures
     │   ├── urls.py             # Avito search URL builder
@@ -122,8 +127,8 @@ cur.execute("PRAGMA busy_timeout=5000")
 - **DealFeedback**: Stores 👍 and 👎 user reactions to deals.
   - Fields: `tg_id` (PK), `listing_id` (PK), `reaction` (up / down), `created_at`.
 
-### Retention Maintenance (`techhunter/storage.py`)
-To prevent unbounded database growth, a background loop calls `cleanup_old_rows()` every 6 hours (configurable via `CLEANUP_INTERVAL_SEC`):
+### Retention Maintenance (`techhunter/monitoring/maintenance.py` & `storage.py`)
+To prevent unbounded database growth, a background loop inside `maintenance.py` calls `cleanup_old_rows()` every 6 hours (configurable via `CLEANUP_INTERVAL_SEC`):
 - `ImageHash`: Deleted after `IMAGE_HASH_RETENTION_DAYS` (default 21)
 - `PriceObservation`: Deleted after `PRICE_OBS_RETENTION_DAYS` (default 150)
 - `Listing`: Deleted after `LISTINGS_RETENTION_DAYS` (default 14)
@@ -171,13 +176,13 @@ Free-text parser `extract_specs` translates Russian inflections into standard de
   - `carrier_locked`: R-SIM, MDM lock, demo units (`ldu`), bypass software, locked carrier bands.
   - `screen_cracked`: Physical crack on glass or display assembly.
   - `screen_replaced`: Replaced display, "not original", or copies.
-  - `battery_replaced`: Replaced battery, bloated battery, or battery health under `BATTERY_DEFECT_THRESHOLD` (default 80%).
+  - `battery_replaced`: Replaced battery, bloated battery, battery health under `BATTERY_DEFECT_THRESHOLD` (default 80%), exact 100% health on older models, or physical mismatch between cycle count and reported health (dynamic wear curve).
   - `faceid_broken`: Non-functional Face ID or Touch ID.
   - `truetone_missing`: True Tone feature absent (typical indicator of screen swap).
   - `screen_display_defect`: Matrix damage, stripes, dead pixels, or bright spots.
-  - `cosmetic_wear`: Surface scratches, cracks (excluding front display), minor dents.
+  - `cosmetic_wear`: Surface scratches, cracks (excluding front display), minor dents (Note: treated as GOOD condition, not DEFECT, per user preference).
 - **Homoglyph Normalization**: Spammers often bypass regex filters by blending Russian characters with identical-looking Latin letters (e.g. Russian "а" with Latin "a"). Every description is pre-normalized via `normalize_homoglyphs` inside `techhunter/textnorm.py` before parsing.
-- **Negation Negation Guard (`_NEG_CLEAN`)**: Before running defect regexes, typical Russian negative claims like "не битый", "без замены", "Neverlock", or "нет никаких полос" are wiped out. This prevents false positive defects on clean listings.
+- **Negation Guard (`_NEG_CLEAN`)**: Before running defect regexes, typical Russian negative claims like "не битый", "без замены", "Neverlock", or "нет никаких полос" are wiped out. Similarly, `scam.py` guards against "не копия", "не паль" to prevent false positive flags on clean listings.
 
 ### Lazy Thread-Safe CLIP (`techhunter/ai/clip_engine.py`)
 CLIP is used to filter out noise photos (e.g. settings screenshots, empty boxes, or accessories).

@@ -147,7 +147,7 @@ async def fast_value_listing(
         )
         if baseline is None or sample < config.BASELINE_MIN_SAMPLE:
             return "learn"
-        limit = market * config.FAST_VALUATION_THRESHOLD_PCT
+        limit = baseline * config.FAST_VALUATION_THRESHOLD_PCT
         return "deal" if ((item.price or 0) > 0 and (item.price or 0) < limit) else "skip"
 
     device_id = await get_or_create_device(

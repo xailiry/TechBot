@@ -26,13 +26,17 @@ _ORIG = [
     re.compile(r"\bкоробк[аи]\b", re.I),
 ]
 _FAKE = [
-    re.compile(r"\bкопи[яийюе]\b", re.I),
-    re.compile(r"\bреплик[аиую]\b", re.I),
-    re.compile(r"\bподделк", re.I),
-    re.compile(r"\b1\s*[:вкx]\s*1\b", re.I),
-    re.compile(r"\b(?:люкс|lux|premium)\s*копи", re.I),
+    re.compile(r"(?<!не )(?<!без )\bкопи[яийюе]\b", re.I),
+    re.compile(r"(?<!не )(?<!без )\bреплик[аиую]\b", re.I),
+    re.compile(r"(?<!не )(?<!без )\bподделк", re.I),
+    re.compile(r"(?<!не )(?<!без )\b1\s*[:вкx]\s*1\b", re.I),
+    re.compile(r"(?<!не )(?<!без )\b(?:люкс|lux|premium)\s*копи", re.I),
     re.compile(r"\bне\s*оригинал\b", re.I),
-    re.compile(r"\bfake\b", re.I),
+    re.compile(r"(?<!не )(?<!без )\bfake\b", re.I),
+    re.compile(r"(?<!не )(?<!без )\bпаль\b", re.I),
+    re.compile(r"(?<!не )(?<!без )\bаналог\b", re.I),
+    re.compile(r"(?<!не )(?<!без )\bзакос\b", re.I),
+    re.compile(r"(?<!не )(?<!без )\bмуляж\b", re.I),
 ]
 _REFURB = re.compile(
     r"\bреф\b|рефаб|refurb|восстановл\w*|восстановк", re.I
@@ -195,21 +199,23 @@ def score_listing(
             score += 6
             pros.append("частник")
 
-    # Price-vs-baseline scam check ONLY for working-grade lots. For broken /
-    # defect / for_parts a low price is the opportunity, not a red flag.
+    # Price-vs-baseline scam check. A price below 8% is almost always a scam bait, regardless of condition.
+    # Working grades below 20% are also highly suspicious.
     if (
         baseline_price
         and price > 0
-        and condition in _WORKING_GRADES
     ):
         ratio = price / baseline_price
-        if ratio < 0.20:
+        if ratio < 0.08:
+            score -= 35
+            cons.append(f"цена {ratio*100:.0f}% от рынка — откровенный скам-приманка")
+        elif condition in _WORKING_GRADES and ratio < 0.20:
             score -= 35
             cons.append(f"цена {ratio*100:.0f}% от рынка для рабочего — подозрительно")
-        elif ratio < 0.40:
+        elif condition in _WORKING_GRADES and ratio < 0.40:
             score -= 10
             cons.append(f"цена {ratio*100:.0f}% от рынка")
-        elif 0.40 <= ratio <= 0.85:
+        elif condition in _WORKING_GRADES and 0.40 <= ratio <= 0.85:
             score += 14
             pros.append(f"цена {ratio*100:.0f}% от рынка — хороший арбитраж")
         if avito_price_badge == "below":
