@@ -83,6 +83,7 @@ async def send_deal_card(
                 msg.message_id,
                 item.model_dump(),
                 valuation.model_dump(),
+                report.model_dump(),
                 sub_query,
             )
         except Exception as e:

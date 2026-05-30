@@ -49,8 +49,8 @@ def _extract_cycles(text: str) -> int | None:
 
 
 # --- storage / ram ----------------------------------------------------------
-_RAM_ROM = re.compile(r"\b(\d{1,2})\s*/\s*(\d{2,4})\s*(?:гб|gb)\b", re.I)
-_STORAGE = re.compile(r"\b(\d{2,4})\s*(гб|gb|тб|tb)\b", re.I)
+_RAM_ROM = re.compile(r"\b(\d{1,2})\s*/\s*(\d{1,4})\s*(гб|gb|тб|tb)\b", re.I)
+_STORAGE = re.compile(r"\b(\d{1,4})\s*(гб|gb|тб|tb)\b", re.I)
 _RAM_ONLY = re.compile(r"\b(?:озу|ram)\s*[:\-]?\s*(\d{1,2})\b|\b(\d{1,2})\s*(?:гб|gb)\s*озу\b", re.I)
 
 _VALID_STORAGE = {16, 32, 64, 128, 256, 512, 1024, 2048}
@@ -205,6 +205,8 @@ def _extract_storage_ram(text: str) -> tuple[int | None, int | None]:
     if (m := _RAM_ROM.search(text)):
         ram = int(m.group(1))
         s = int(m.group(2))
+        if m.group(3).lower() in ("тб", "tb"):
+            s *= 1024
         if s in _VALID_STORAGE:
             storage = s
     if storage is None:

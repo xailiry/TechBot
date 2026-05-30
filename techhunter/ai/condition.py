@@ -35,6 +35,10 @@ class Condition(Enum):
     FOR_PARTS = "for_parts"
     UNKNOWN = "unknown"
 
+    @property
+    def is_working(self) -> bool:
+        return self in (Condition.IDEAL, Condition.GOOD)
+
 
 def grade_condition(specs: DeviceSpecs, text: str = "") -> Condition:
     d = specs.defects

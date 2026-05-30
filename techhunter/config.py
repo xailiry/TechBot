@@ -31,6 +31,12 @@ DEFAULT_CITY_SLUG = os.getenv("DEFAULT_CITY_SLUG", "rossiya")
 AVITO_HEADLESS = os.getenv("AVITO_HEADLESS", "False").lower() in ("true", "1", "yes")
 # Persistent on-disk profile keeps the Datadome/Avito session across restarts.
 BROWSER_PROFILE_DIR = os.getenv("BROWSER_PROFILE_DIR", str(DATA_DIR / "browser_profile"))
+# Do not remove Chrome's own profile lock files by default. If a previous
+# Chrome crashed and left stale locks, set this explicitly for one recovery
+# run; a live profile must never be "unlocked" behind Chrome's back.
+BROWSER_FORCE_CLEAR_PROFILE_LOCKS = os.getenv(
+    "BROWSER_FORCE_CLEAR_PROFILE_LOCKS", "False"
+).lower() in ("true", "1", "yes")
 # Prefer real installed Chrome; code falls back to bundled Chromium if absent.
 BROWSER_CHANNEL = os.getenv("BROWSER_CHANNEL", "chrome")
 PAGE_POOL_SIZE = int(os.getenv("PAGE_POOL_SIZE", "5"))

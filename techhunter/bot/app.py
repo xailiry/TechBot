@@ -1,5 +1,6 @@
 """aiogram bot: button-first UI with a single-message hub, Back everywhere,
 guided add, per-user delivery filters. Commands remain as shortcuts."""
+import contextlib
 import logging
 
 from aiogram import Bot, Dispatcher, F
@@ -17,6 +18,7 @@ from aiogram.types import (
 from .. import config
 from ..storage import (
     add_subscription,
+    feedback_features,
     get_card_state,
     record_feedback,
     remove_subscription,
@@ -29,8 +31,12 @@ from ..storage import (
 from .cards import haggle_text
 from .format import esc, fmt_price, parse_command
 from .screens import (
+    DISCOVERY_PRESETS,
     hub_kb,
     screen_add,
+    screen_dev,
+    screen_dev_confirm,
+    screen_dev_result,
     screen_discovery,
     screen_help,
     screen_hub,
@@ -44,6 +50,18 @@ from .screens import (
 
 log = logging.getLogger(__name__)
 dp = Dispatcher()
+
+FEEDBACK_REASONS: tuple[tuple[str, str], ...] = (
+    ("too_expensive", "дорого / мало профита"),
+    ("reseller", "магазин / перекуп"),
+    ("reseller_rebuild", "пересобранный перекупом"),
+    ("condition", "состояние хуже"),
+    ("battery", "АКБ / замена батареи"),
+    ("wrong_model", "не та модель / память"),
+    ("scam", "мошенник / мутно"),
+    ("duplicate", "дубль / уже видел"),
+    ("other", "другое"),
+)
 
 
 class AddSub(StatesGroup):
@@ -109,6 +127,34 @@ async def cmd_settings(msg: Message) -> None:
     await upsert_user(msg.from_user.id, msg.from_user.username)
     text, kb = await screen_settings(msg.from_user.id)
     await msg.answer(text, parse_mode="HTML", reply_markup=kb)
+
+
+@dp.message(Command("status"))
+async def cmd_status(msg: Message) -> None:
+    text, kb = await screen_status()
+    await msg.answer(text, parse_mode="HTML", reply_markup=kb)
+
+
+@dp.message(Command("dev"))
+async def cmd_dev(msg: Message) -> None:
+    text, kb = await screen_dev()
+    await msg.answer(text, parse_mode="HTML", reply_markup=kb)
+
+
+@dp.message(Command("quality"))
+async def cmd_quality(msg: Message) -> None:
+    await upsert_user(msg.from_user.id, msg.from_user.username)
+    text, kb = await screen_quality(msg.from_user.id)
+    await msg.answer(text, parse_mode="HTML", reply_markup=kb)
+
+
+@dp.message(Command("retry_pending"))
+async def cmd_retry_pending(msg: Message) -> None:
+    from ..monitor import _retry_pending_alerts
+    from .notifier import TelegramNotifier
+
+    sent = await _retry_pending_alerts(TelegramNotifier(msg.bot))
+    await msg.answer(f"🔁 Outbox retry: отправлено {sent}.")
 
 
 async def _save_subscription(tg_id: int, body: str) -> str | None:
@@ -246,6 +292,7 @@ async def cmd_train_stop(msg: Message) -> None:
 @dp.message(Command("train_stat"))
 async def cmd_train_stat(msg: Message) -> None:
     try:
+        from .. import runtime
         from techhunter.db.session import async_session_factory
         from sqlalchemy import text
         
@@ -259,11 +306,18 @@ async def cmd_train_stat(msg: Message) -> None:
             res = await session.execute(text("SELECT count(*) FROM listings"))
             cache_count = res.scalar() or 0
             
-            status = "🏃 <b>Запущено</b>" if (from_runtime := __import__("techhunter.runtime", fromlist=["is_training_mode"])).is_training_mode() else "⏸ <b>Остановлено</b>"
+            snap = runtime.snapshot()
+            tr = snap.get("training") or {}
+            status = "🏃 <b>Запущено</b>" if runtime.is_training_mode() else "⏸ <b>Остановлено</b>"
             
             await msg.answer(
                 f"📊 <b>Статистика обучения:</b>\n"
                 f"Статус: {status}\n\n"
+                f"Страница: <b>{tr.get('current_page', 0)}/{tr.get('max_pages', 0)}</b>\n"
+                f"Последний шаг: card <b>{tr.get('card_learned', 0)}</b>, "
+                f"detail <b>{tr.get('detail_learned', 0)}</b>, "
+                f"skipped <b>{tr.get('skipped', 0)}</b>\n"
+                f"Последняя ошибка: <b>{esc(tr.get('last_error') or 'нет')}</b>\n\n"
                 f"📱 Известно устройств: <b>{dev_count}</b>\n"
                 f"💰 Собрано новых цен: <b>{obs_count}</b>\n"
                 f"🗃 Просмотрено карточек (общее): <b>{cache_count}</b>",
@@ -284,6 +338,7 @@ async def cb_noop(cb: CallbackQuery) -> None:
 
 @dp.callback_query(F.data.startswith("nav:"))
 async def cb_nav(cb: CallbackQuery, state: FSMContext) -> None:
+    await _answer_cb(cb)
     parts = cb.data.split(":")
     dest = parts[1]
     if dest == "hub":
@@ -300,6 +355,8 @@ async def cb_nav(cb: CallbackQuery, state: FSMContext) -> None:
         await _edit(cb, await screen_settings(cb.from_user.id))
     elif dest == "status":
         await _edit(cb, await screen_status())
+    elif dest == "dev":
+        await _edit(cb, await screen_dev())
     elif dest == "learned":
         page = int(parts[2]) if len(parts) > 2 else 0
         await _edit(cb, await screen_learned(page))
@@ -310,7 +367,6 @@ async def cb_nav(cb: CallbackQuery, state: FSMContext) -> None:
     elif dest == "prices":
         sid = int(parts[2]) if len(parts) > 2 else 0
         await _edit(cb, await screen_prices(cb.from_user.id, sid))
-    await _answer_cb(cb)
 
 
 @dp.callback_query(F.data.startswith("sub:del:"))
@@ -323,6 +379,7 @@ async def cb_sub_del(cb: CallbackQuery) -> None:
 
 @dp.callback_query(F.data.startswith("set:"))
 async def cb_settings(cb: CallbackQuery) -> None:
+    await _answer_cb(cb)
     parts = cb.data.split(":")
     action = parts[1]
     tg = cb.from_user.id
@@ -343,7 +400,6 @@ async def cb_settings(cb: CallbackQuery) -> None:
     elif action == "cond":
         await toggle_exclude_condition(tg, parts[2])
         await _edit(cb, await screen_settings(tg))
-    await _answer_cb(cb, "Сохранено")
 
 
 @dp.callback_query(F.data.startswith("disc:"))
@@ -380,10 +436,85 @@ async def cb_discovery(cb: CallbackQuery) -> None:
         new = min(0.9, max(0.0, round(cur + delta / 100, 2)))
         await set_discovery_profit(tg, ratio=new)
         await _answer_cb(cb, f"Мин. маржа: {int(new * 100)}%")
+    elif action == "preset":
+        preset = parts[2] if len(parts) > 2 else "balance"
+        label, rub, ratio = DISCOVERY_PRESETS.get(
+            preset, DISCOVERY_PRESETS["balance"]
+        )
+        await set_discovery_profit(tg, rub=rub, ratio=ratio)
+        await _answer_cb(cb, f"Discovery: {label}")
     else:
         await _answer_cb(cb)
         return
     await _edit(cb, await screen_discovery(cb.from_user.id))
+
+
+@dp.callback_query(F.data == "dev:raw")
+async def cb_dev_raw(cb: CallbackQuery) -> None:
+    await _edit(cb, await screen_dev(raw=True))
+
+
+@dp.callback_query(F.data.startswith("dev:confirm:"))
+async def cb_dev_confirm(cb: CallbackQuery) -> None:
+    await _answer_cb(cb)
+    action = cb.data.split(":", 2)[2]
+    await _edit(cb, screen_dev_confirm(action))
+
+
+@dp.callback_query(F.data.startswith("dev:run:"))
+async def cb_dev_run(cb: CallbackQuery) -> None:
+    await _answer_cb(cb, "Запускаю")
+    action = cb.data.split(":", 2)[2]
+    try:
+        details = await _run_dev_action(action, cb.bot)
+        await _edit(cb, screen_dev_result("Готово", details))
+    except Exception as e:
+        log.exception("dev action failed: %s", action)
+        await _edit(cb, screen_dev_result("Ошибка", f"<code>{esc(e)}</code>"))
+
+
+async def _run_dev_action(action: str, bot: Bot) -> str:
+    if action == "retry_outbox":
+        from ..monitor import _retry_pending_alerts
+        from .notifier import TelegramNotifier
+
+        sent = await _retry_pending_alerts(TelegramNotifier(bot))
+        return f"Outbox retry: отправлено <b>{sent}</b>."
+    if action == "train_start":
+        from .. import runtime
+
+        runtime.set_training_mode(True)
+        return "Training mode включён. Мониторинг сделок остановлен."
+    if action == "train_stop":
+        from .. import runtime
+
+        runtime.set_training_mode(False)
+        return "Training mode выключен. Обычная работа восстановится следующим циклом."
+    if action == "browser_restart":
+        from ..scraper.browser import shutdown_browser
+
+        await shutdown_browser()
+        return "Браузер остановлен. Монитор создаст новый контекст на следующем обращении."
+    if action == "clear_dead_outbox":
+        from ..storage import clear_dead_pending_alerts
+
+        deleted = await clear_dead_pending_alerts()
+        return f"Удалено dead outbox rows: <b>{deleted}</b>."
+    if action == "relearn_stale":
+        from ..valuation.devices import relearn_stale_baselines
+
+        res = await relearn_stale_baselines()
+        return (
+            f"Проверено: <b>{res['checked']}</b>. "
+            f"Пересчитано: <b>{res['relearned']}</b>."
+        )
+    if action == "cleanup_old_rows":
+        from ..storage import cleanup_old_rows
+
+        res = await cleanup_old_rows()
+        rows = "\n".join(f"{esc(k)}: <b>{v}</b>" for k, v in res.items())
+        return rows or "Нечего чистить."
+    return f"Неизвестное действие: <code>{esc(action)}</code>"
 
 
 
@@ -391,6 +522,7 @@ async def cb_discovery(cb: CallbackQuery) -> None:
 
 @dp.callback_query(F.data == "add:start")
 async def cb_add_start(cb: CallbackQuery, state: FSMContext) -> None:
+    await _answer_cb(cb)
     await upsert_user(cb.from_user.id, cb.from_user.username)
     await state.set_state(AddSub.waiting)
     await state.update_data(
@@ -458,11 +590,80 @@ async def cb_feedback(cb: CallbackQuery) -> None:
     if len(parts) < 3:
         await _answer_cb(cb)
         return
-    direction = "up" if parts[1] == "up" else "down"
-    await record_feedback(cb.from_user.id, parts[2], direction)
-    await _answer_cb(
-        cb,
-        "Спасибо, учту 👍" if direction == "up" else "Понял, мимо 👎"
+    action = parts[1]
+    if action == "down":
+        await _answer_cb(cb, "Выбери причину")
+        await cb.message.reply(
+            "👎 <b>Почему мимо?</b>\n\n"
+            "Причина попадёт в личную калибровку. Если такие промахи "
+            "повторяются, бот начнёт душить похожие лоты.",
+            parse_mode="HTML",
+            reply_markup=_feedback_reason_kb(cb.message.message_id),
+        )
+        return
+    if action == "reason":
+        rest = parts[2].split(":", 1)
+        if len(rest) != 2 or not rest[0].isdigit():
+            await _answer_cb(cb)
+            return
+        source_mid = int(rest[0])
+        reason = rest[1]
+        await _record_card_feedback(cb.from_user.id, source_mid, "down", reason)
+        label = dict(FEEDBACK_REASONS).get(reason, reason)
+        await _answer_cb(cb, f"Запомнил: {label}")
+        with contextlib.suppress(Exception):
+            await cb.message.edit_text(
+                f"👎 Запомнил причину: <b>{esc(label)}</b>",
+                parse_mode="HTML",
+            )
+        return
+    if action == "up":
+        await _record_card_feedback(cb.from_user.id, cb.message.message_id, "up")
+        await _answer_cb(cb, "Спасибо, учту 👍")
+        return
+    await _answer_cb(cb)
+
+
+def _feedback_reason_kb(message_id: int) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for i in range(0, len(FEEDBACK_REASONS), 2):
+        row = []
+        for reason, label in FEEDBACK_REASONS[i:i + 2]:
+            row.append(InlineKeyboardButton(
+                text=label,
+                callback_data=f"fb:reason:{message_id}:{reason}",
+            ))
+        rows.append(row)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _record_card_feedback(
+    tg_id: int,
+    message_id: int,
+    reaction: str,
+    reason: str | None = None,
+) -> None:
+    st = await get_card_state(tg_id, message_id)
+    if not st:
+        await record_feedback(tg_id, str(message_id), reaction, reason=reason)
+        return
+
+    listing_id = st.get("item", {}).get("id") or str(message_id)
+    features = None
+    if st.get("report") is not None:
+        try:
+            from ..ai.evaluate import EvaluationReport
+            from ..scraper.models import ParsedListing
+            from ..valuation.engine import Valuation
+
+            item = ParsedListing(**st["item"])
+            report = EvaluationReport(**st["report"])
+            valuation = Valuation(**st["valuation"])
+            features = feedback_features(item, report, valuation)
+        except Exception as e:
+            log.debug("feedback feature snapshot failed: %s", e)
+    await record_feedback(
+        tg_id, listing_id, reaction, reason=reason, features=features
     )
 
 

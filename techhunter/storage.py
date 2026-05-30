@@ -5,7 +5,7 @@ import logging
 
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from . import config
@@ -14,8 +14,10 @@ from .db import get_session
 from .db.models import (
     CardState,
     DealFeedback,
+    DeviceCatalog,
     ImageHash,
     Listing,
+    MarketBaseline,
     PendingAlert,
     PriceObservation,
     SentAlert,
@@ -328,20 +330,43 @@ async def get_subscription(tg_id: int, sub_id: int) -> Subscription | None:
 
 
 async def record_feedback(
-    tg_id: int, listing_id: str, reaction: str
+    tg_id: int,
+    listing_id: str,
+    reaction: str,
+    *,
+    reason: str | None = None,
+    features: dict | None = None,
 ) -> None:
     """Persist a user's reaction to a deal (feedback loop)."""
     if reaction not in ("up", "down"):
         return
+    if reaction == "up":
+        reason = None
     async with get_session() as s:
         stmt = (
             sqlite_insert(DealFeedback)
-            .values(tg_id=tg_id, listing_id=listing_id, reaction=reaction)
+            .values(
+                tg_id=tg_id,
+                listing_id=listing_id,
+                reaction=reaction,
+                reason=reason,
+                feature_json=(
+                    json.dumps(features, ensure_ascii=False)
+                    if features is not None else None
+                ),
+            )
             .on_conflict_do_update(
                 index_elements=[
                     DealFeedback.tg_id, DealFeedback.listing_id
                 ],
-                set_={"reaction": reaction},
+                set_={
+                    "reaction": reaction,
+                    "reason": reason,
+                    "feature_json": (
+                        json.dumps(features, ensure_ascii=False)
+                        if features is not None else None
+                    ),
+                },
             )
         )
         await s.execute(stmt)
@@ -359,6 +384,126 @@ async def feedback_stats(tg_id: int | None = None) -> dict:
         up = sum(1 for r, *_ in fb if r == "up")
         down = sum(1 for r, *_ in fb if r == "down")
         return {"up": up, "down": down, "total": up + down}
+
+
+def feedback_features(item, report, valuation) -> dict:
+    """Small explainable feature snapshot stored with each reaction."""
+    seller_listings = getattr(item, "seller_listings", None)
+    seller_reviews = getattr(item, "seller_reviews", None)
+    battery = getattr(report, "battery_health", None)
+    baseline = getattr(valuation, "baseline_price", None)
+    price_ratio = None
+    if baseline and getattr(item, "price", None):
+        price_ratio = round(item.price / baseline, 3)
+    return {
+        "title": getattr(item, "title", ""),
+        "price": getattr(item, "price", None),
+        "device_key": getattr(valuation, "device_key", None),
+        "condition": getattr(report, "condition", None),
+        "sealed": bool(getattr(report, "is_sealed", False)),
+        "battery": battery,
+        "defects": list(getattr(report, "defects", []) or []),
+        "seller_type": getattr(item, "seller_type", None),
+        "seller_label": getattr(item, "seller_label", None),
+        "seller_listings": seller_listings,
+        "seller_reviews": seller_reviews,
+        "shoplike": bool(getattr(valuation, "shoplike", False)),
+        "scam_score": getattr(valuation, "scam_score", None),
+        "baseline_price": baseline,
+        "profit": getattr(valuation, "net_profit", None),
+        "profit_pct": getattr(valuation, "profit_pct", None),
+        "price_ratio": price_ratio,
+        "avito_price_badge": getattr(item, "avito_price_badge", None),
+        "avito_market_badge": bool(getattr(item, "avito_market_badge", False)),
+        "reseller_rebuild_signal": bool(
+            (
+                seller_listings is not None and seller_listings >= 8
+            )
+            or bool(getattr(valuation, "shoplike", False))
+            or (
+                battery == 100
+                and not bool(getattr(report, "is_sealed", False))
+            )
+        ),
+    }
+
+
+async def feedback_reason_stats(tg_id: int) -> dict[str, int]:
+    async with get_session() as s:
+        rows = (
+            await s.execute(
+                select(DealFeedback.reason, func.count())
+                .where(
+                    DealFeedback.tg_id == tg_id,
+                    DealFeedback.reaction == "down",
+                    DealFeedback.reason.is_not(None),
+                )
+                .group_by(DealFeedback.reason)
+            )
+        ).all()
+    return {str(reason): int(count) for reason, count in rows if reason}
+
+
+async def feedback_personal_penalty(tg_id: int, item, report, valuation) -> dict:
+    """Reason-aware personal calibration.
+
+    The old feedback loop only changed the global profit threshold. This one
+    adds explainable reason-specific pressure after repeated dislikes.
+    """
+    stats = await feedback_reason_stats(tg_id)
+    if not stats:
+        return {"drop": False, "reason": None, "score_penalty": 0, "extra_profit": 0}
+
+    f = feedback_features(item, report, valuation)
+    reason = None
+    score_penalty = 0
+    extra_profit = 0
+
+    if stats.get("reseller_rebuild", 0) >= 2 and f["reseller_rebuild_signal"]:
+        reason = "feedback_reseller_rebuild"
+        score_penalty += min(35, 15 + stats["reseller_rebuild"] * 5)
+        extra_profit += min(20000, 6000 + stats["reseller_rebuild"] * 2000)
+    elif stats.get("reseller", 0) >= 3 and (
+        f["shoplike"]
+        or f["seller_type"] == "shop"
+        or (f["seller_listings"] is not None and f["seller_listings"] >= 8)
+    ):
+        reason = "feedback_reseller"
+        score_penalty += min(25, 10 + stats["reseller"] * 3)
+        extra_profit += min(15000, 4000 + stats["reseller"] * 1500)
+    elif stats.get("battery", 0) >= 2 and (
+        (f["battery"] is not None and f["battery"] < 88)
+        or "battery_replaced" in f["defects"]
+        or (f["battery"] == 100 and f["reseller_rebuild_signal"])
+    ):
+        reason = "feedback_battery"
+        score_penalty += 15
+        extra_profit += 5000
+    elif stats.get("condition", 0) >= 2 and f["condition"] in {
+        "defect", "broken", "for_parts"
+    }:
+        reason = "feedback_condition"
+        score_penalty += 15
+        extra_profit += 5000
+    elif stats.get("too_expensive", 0) >= 3:
+        reason = "feedback_too_expensive"
+        extra_profit += min(20000, 5000 + stats["too_expensive"] * 1500)
+    elif stats.get("scam", 0) >= 2 and (f["scam_score"] or 100) < 80:
+        reason = "feedback_scam"
+        score_penalty += 20
+
+    if not reason:
+        return {"drop": False, "reason": None, "score_penalty": 0, "extra_profit": 0}
+
+    adjusted_score = (f["scam_score"] or 0) - score_penalty
+    required_profit = (getattr(valuation, "net_profit", None) or 0) - extra_profit
+    drop = adjusted_score < 60 or required_profit < config.MIN_PROFIT_RUB
+    return {
+        "drop": drop,
+        "reason": reason,
+        "score_penalty": score_penalty,
+        "extra_profit": extra_profit,
+    }
 
 
 async def feedback_threshold_multiplier(tg_id: int) -> float:
@@ -499,8 +644,13 @@ async def save_card_state(
     message_id: int,
     item: dict,
     valuation: dict,
+    report: dict | None = None,
     sub_query: str | None = None,
 ) -> None:
+    if isinstance(report, str) and sub_query is None:
+        sub_query = report
+        report = None
+    report_json = json.dumps(report, ensure_ascii=False) if report is not None else None
     async with get_session() as s:
         stmt = (
             sqlite_insert(CardState)
@@ -508,6 +658,7 @@ async def save_card_state(
                 tg_id=tg_id,
                 message_id=message_id,
                 item_json=json.dumps(item, ensure_ascii=False),
+                report_json=report_json,
                 score_json=json.dumps(valuation, ensure_ascii=False),
                 sub_query=sub_query,
             )
@@ -515,6 +666,7 @@ async def save_card_state(
                 index_elements=[CardState.tg_id, CardState.message_id],
                 set_={
                     "item_json": json.dumps(item, ensure_ascii=False),
+                    "report_json": report_json,
                     "score_json": json.dumps(valuation, ensure_ascii=False),
                     "sub_query": sub_query,
                 },
@@ -530,6 +682,7 @@ async def get_card_state(tg_id: int, message_id: int) -> dict | None:
             return None
         return {
             "item": json.loads(row.item_json),
+            "report": json.loads(row.report_json) if row.report_json else None,
             "valuation": json.loads(row.score_json),
             "sub_query": row.sub_query,
         }
@@ -593,6 +746,7 @@ async def queue_pending_alert(
                 ),
                 sub_query=sub_query,
                 last_error=error,
+                next_attempt_at=datetime.now(timezone.utc),
             )
             .on_conflict_do_update(
                 index_elements=[PendingAlert.tg_id, PendingAlert.listing_id],
@@ -608,6 +762,8 @@ async def queue_pending_alert(
                     ),
                     "sub_query": sub_query,
                     "last_error": error,
+                    "dead_reason": None,
+                    "next_attempt_at": datetime.now(timezone.utc),
                 },
             )
         )
@@ -615,9 +771,17 @@ async def queue_pending_alert(
 
 
 async def list_pending_alerts(limit: int = 10) -> list[dict]:
+    now = datetime.now(timezone.utc)
     async with get_session() as s:
         rows = await s.execute(
             select(PendingAlert)
+            .where(
+                PendingAlert.dead_reason.is_(None),
+                or_(
+                    PendingAlert.next_attempt_at.is_(None),
+                    PendingAlert.next_attempt_at <= now,
+                ),
+            )
             .order_by(PendingAlert.created_at)
             .limit(limit)
         )
@@ -634,13 +798,19 @@ async def list_pending_alerts(limit: int = 10) -> list[dict]:
                     "attempts": row.attempts,
                     "last_error": row.last_error,
                     "created_at": row.created_at,
+                    "next_attempt_at": row.next_attempt_at,
+                    "dead_reason": row.dead_reason,
                 }
             )
         return out
 
 
 async def mark_pending_alert_attempt(
-    tg_id: int, listing_id: str, error: str | None = None
+    tg_id: int,
+    listing_id: str,
+    error: str | None = None,
+    *,
+    dead_reason: str | None = None,
 ) -> None:
     async with get_session() as s:
         row = await s.get(PendingAlert, (tg_id, listing_id))
@@ -649,6 +819,14 @@ async def mark_pending_alert_attempt(
         row.attempts = (row.attempts or 0) + 1
         row.last_attempt_at = datetime.now(timezone.utc)
         row.last_error = error
+        if dead_reason:
+            row.dead_reason = dead_reason
+            row.next_attempt_at = None
+        else:
+            delay = min(3600, 60 * (2 ** min(row.attempts - 1, 5)))
+            row.next_attempt_at = datetime.now(timezone.utc) + timedelta(
+                seconds=delay
+            )
 
 
 async def delete_pending_alert(tg_id: int, listing_id: str) -> None:
@@ -659,3 +837,61 @@ async def delete_pending_alert(tg_id: int, listing_id: str) -> None:
                 PendingAlert.listing_id == listing_id,
             )
         )
+
+
+async def clear_dead_pending_alerts() -> int:
+    """Drop outbox rows that will never be retried again."""
+    async with get_session() as s:
+        res = await s.execute(
+            delete(PendingAlert).where(PendingAlert.dead_reason.is_not(None))
+        )
+        return int(res.rowcount or 0)
+
+
+async def pending_alert_stats() -> dict:
+    async with get_session() as s:
+        pending = (
+            await s.execute(
+                select(func.count()).select_from(PendingAlert)
+                .where(PendingAlert.dead_reason.is_(None))
+            )
+        ).scalar() or 0
+        dead = (
+            await s.execute(
+                select(func.count()).select_from(PendingAlert)
+                .where(PendingAlert.dead_reason.is_not(None))
+            )
+        ).scalar() or 0
+        oldest = (
+            await s.execute(
+                select(PendingAlert.created_at)
+                .where(PendingAlert.dead_reason.is_(None))
+                .order_by(PendingAlert.created_at)
+                .limit(1)
+            )
+        ).scalar()
+    return {"pending": int(pending), "dead": int(dead), "oldest": oldest}
+
+
+async def dev_db_stats() -> dict[str, int]:
+    """Raw table counters for the owner-only /dev panel."""
+    models = {
+        "devices": DeviceCatalog,
+        "baselines": MarketBaseline,
+        "observations": PriceObservation,
+        "listings": Listing,
+        "sent_alerts": SentAlert,
+        "pending_alerts": PendingAlert,
+        "card_state": CardState,
+        "feedback": DealFeedback,
+    }
+    out: dict[str, int] = {}
+    async with get_session() as s:
+        for key, model in models.items():
+            out[key] = int(
+                (
+                    await s.execute(select(func.count()).select_from(model))
+                ).scalar()
+                or 0
+            )
+    return out

@@ -127,6 +127,15 @@ def test_card_text() -> None:
     )
     check("missing RU", "не задана цена ремонта" in mt)
 
+    bt = format_deal_card(
+        _item(avito_price_badge="below", seller_type="company"),
+        _report(condition="defect"),
+        _val(shoplike=True, scam_score=55, cons=["много объявлений"]),
+        "",
+    )
+    check("card has badges", "ниже рынка" in bt
+          and "магазин/перекуп" in bt and "риск" in bt)
+
 
 def test_haggle_and_kb() -> None:
     cheap = build_haggle_text(_item(price=20000), _val(baseline_price=80000))
@@ -146,6 +155,15 @@ def test_haggle_and_kb() -> None:
     check("fb down callback",
           any((b.callback_data or "").startswith("fb:down:") for b in flat))
 
+    from techhunter.bot.app import _feedback_reason_kb
+    rkb = _feedback_reason_kb(12345)
+    rcbs = [b.callback_data for row in rkb.inline_keyboard for b in row]
+    rtxt = [b.text for row in rkb.inline_keyboard for b in row]
+    check("feedback has rebuild reason",
+          "пересобранный перекупом" in rtxt)
+    check("feedback reason callback compact",
+          "fb:reason:12345:reseller_rebuild" in rcbs)
+
 
 async def test_card_state_roundtrip() -> None:
     from techhunter.storage import (
@@ -158,9 +176,14 @@ async def test_card_state_roundtrip() -> None:
     await upsert_user(tg, "tester")
     item = _item()
     val = _val()
-    await save_card_state(tg, 42, item.model_dump(), val.model_dump(), "q")
+    rep = _report()
+    await save_card_state(
+        tg, 42, item.model_dump(), val.model_dump(), rep.model_dump(), "q"
+    )
     st = await get_card_state(tg, 42)
     check("state restored", st is not None and st["sub_query"] == "q")
+    check("state has report", st["report"] is not None
+          and st["report"]["condition"] == rep.condition)
     txt = haggle_text(st["item"], st["valuation"])
     check("haggle from restored state", "<code>" in txt)
     check("missing state -> None", await get_card_state(tg, 999999) is None)
@@ -296,8 +319,8 @@ async def test_hub_screen() -> None:
     text, kb = await screen_hub()
     check("hub text", "TechHunter" in text)
     cbs = [b.callback_data for row in kb.inline_keyboard for b in row]
-    for need in ("nav:subs:0", "nav:add", "nav:settings",
-                 "nav:status", "nav:help"):
+    for need in ("nav:discovery", "nav:subs:0", "nav:learned:0",
+                 "nav:settings", "nav:status", "nav:help", "nav:dev"):
         check(f"hub has {need}", need in cbs)
     _, hkb = screen_help()
     check("help has back",
@@ -325,20 +348,38 @@ async def test_settings_screen() -> None:
     check("settings has score btn", "set:score:10" in cbs)
     check("settings has shop toggle", "set:shop" in cbs)
     check("settings has cond toggle", "set:cond:for_parts" in cbs)
-    check("settings shows shop hidden", "скрыт" in text)
+    check("settings shows shop hidden", "скры" in text)
     check("settings has back",
           any(b.callback_data == "nav:hub"
               for row in kb.inline_keyboard for b in row))
 
 
 async def test_status_screen() -> None:
-    from techhunter.bot.screens import screen_status
+    from techhunter.bot.screens import screen_dev, screen_dev_confirm, screen_status
 
     text, kb = await screen_status()
-    check("status text", "Статус" in text and "Обучение цен" in text)
+    check("status text", "Статус" in text and "База цен" in text)
+    for raw in ("processed", "cache", "drop_reasons", "runtime", "outbox dead"):
+        check(f"status hides {raw}", raw not in text)
     check("status refresh btn",
           any(b.callback_data == "nav:status"
               for row in kb.inline_keyboard for b in row))
+    check("status has dev btn",
+          any(b.callback_data == "nav:dev"
+              for row in kb.inline_keyboard for b in row))
+
+    dt, dkb = await screen_dev()
+    check("dev text", "Dev" in dt and "processed" in dt
+          and "cache" in dt and "drop_reasons" in dt and "Outbox" in dt)
+    dcbs = [b.callback_data for row in dkb.inline_keyboard for b in row]
+    for need in ("dev:confirm:retry_outbox", "dev:confirm:cleanup_old_rows",
+                 "dev:confirm:browser_restart", "dev:raw", "nav:hub"):
+        check(f"dev has {need}", need in dcbs)
+    ct, ckb = screen_dev_confirm("retry_outbox")
+    check("dev confirm text", "Retry outbox" in ct)
+    check("dev confirm run",
+          any(b.callback_data == "dev:run:retry_outbox"
+              for row in ckb.inline_keyboard for b in row))
 
 
 async def test_quality_and_prices_screens() -> None:

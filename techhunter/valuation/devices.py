@@ -9,7 +9,7 @@ import logging
 import asyncio
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -61,6 +61,11 @@ async def get_or_create_device(
             if storage_gb is None
             else DeviceCatalog.storage_gb == storage_gb
         )
+        stmt = stmt.where(
+            DeviceCatalog.ram_gb.is_(None)
+            if ram_gb is None
+            else DeviceCatalog.ram_gb == ram_gb
+        )
         existing = (await s.execute(stmt)).scalar_one_or_none()
         if existing:
             return existing.id
@@ -87,18 +92,29 @@ async def log_observation(
         return False
     async with get_session() as s:
         if listing_id:
-            exists = await s.execute(
-                select(PriceObservation.id)
-                .where(
-                    PriceObservation.source == source,
-                    PriceObservation.listing_id == listing_id,
-                    PriceObservation.device_id == device_id,
-                    PriceObservation.condition == condition,
+            existing = (
+                await s.execute(
+                    select(PriceObservation.id, PriceObservation.price)
+                    .where(
+                        PriceObservation.source == source,
+                        PriceObservation.listing_id == listing_id,
+                        PriceObservation.device_id == device_id,
+                        PriceObservation.condition == condition,
+                    )
                 )
-                .limit(1)
-            )
-            if exists.first() is not None:
+            ).all()
+            if any(int(price) == int(old_price) for _id, old_price in existing):
                 return False
+            if existing:
+                await s.execute(
+                    delete(PriceObservation)
+                    .where(
+                        PriceObservation.source == source,
+                        PriceObservation.listing_id == listing_id,
+                        PriceObservation.device_id == device_id,
+                        PriceObservation.condition == condition,
+                    )
+                )
         s.add(
             PriceObservation(
                 device_id=device_id,
@@ -289,6 +305,7 @@ async def get_model_working_meta(
     exact storage baselines remain the source of truth for final valuation.
     Returns (median_of_variant_medians, total_sample, variant_count).
     """
+    base = model.split(" [", 1)[0]
     async with get_session() as s:
         rows = (
             await s.execute(
@@ -299,13 +316,54 @@ async def get_model_working_meta(
                 .join(DeviceCatalog, DeviceCatalog.id == MarketBaseline.device_id)
                 .where(
                     DeviceCatalog.brand == brand,
-                    DeviceCatalog.model == model,
+                    or_(
+                        DeviceCatalog.model == base,
+                        DeviceCatalog.model.like(f"{base} [%"),
+                    ),
                     DeviceCatalog.storage_gb.is_not(None),
                     MarketBaseline.condition == WORKING_CONDITION,
                     MarketBaseline.sample_size >= config.BASELINE_MIN_SAMPLE,
                 )
             )
         ).all()
+    if not rows:
+        return None, 0, 0
+    prices = [int(price) for price, _sample in rows]
+    sample = sum(int(sample or 0) for _price, sample in rows)
+    return robust_median(prices, drop_low_cluster=False), sample, len(rows)
+
+
+async def get_storage_working_meta(
+    brand: str,
+    model: str,
+    storage_gb: int,
+    ram_gb: int | None = None,
+) -> tuple[int | None, int, int]:
+    """Aggregate sibling baselines for the same storage.
+
+    Used as a triage/fallback bridge when a search card lacks RAM or regional
+    suffix text. Exact detail-page identities still remain the preferred
+    source of truth.
+    """
+    base = model.split(" [", 1)[0]
+    async with get_session() as s:
+        stmt = (
+            select(MarketBaseline.median_price, MarketBaseline.sample_size)
+            .join(DeviceCatalog, DeviceCatalog.id == MarketBaseline.device_id)
+            .where(
+                DeviceCatalog.brand == brand,
+                or_(
+                    DeviceCatalog.model == base,
+                    DeviceCatalog.model.like(f"{base} [%"),
+                ),
+                DeviceCatalog.storage_gb == storage_gb,
+                MarketBaseline.condition == WORKING_CONDITION,
+                MarketBaseline.sample_size >= config.BASELINE_MIN_SAMPLE,
+            )
+        )
+        if ram_gb is not None:
+            stmt = stmt.where(DeviceCatalog.ram_gb == ram_gb)
+        rows = (await s.execute(stmt)).all()
     if not rows:
         return None, 0, 0
     prices = [int(price) for price, _sample in rows]
@@ -418,6 +476,18 @@ async def learning_overview(limit: int = 8) -> dict:
         total = (
             await s.execute(select(func.count()).select_from(DeviceCatalog))
         ).scalar() or 0
+        with_baseline = (
+            await s.execute(
+                select(func.count())
+                .select_from(MarketBaseline)
+                .join(DeviceCatalog, DeviceCatalog.id == MarketBaseline.device_id)
+                .where(
+                    MarketBaseline.condition == WORKING_CONDITION,
+                    MarketBaseline.sample_size >= config.BASELINE_MIN_SAMPLE,
+                    DeviceCatalog.storage_gb.is_not(None),
+                )
+            )
+        ).scalar() or 0
         rows = (
             await s.execute(
                 select(
@@ -429,8 +499,11 @@ async def learning_overview(limit: int = 8) -> dict:
                 )
                 .join(MarketBaseline,
                       MarketBaseline.device_id == DeviceCatalog.id)
-                .where(MarketBaseline.condition == WORKING_CONDITION)
-                .where(DeviceCatalog.storage_gb.is_not(None))
+                .where(
+                    MarketBaseline.condition == WORKING_CONDITION,
+                    MarketBaseline.sample_size >= config.BASELINE_MIN_SAMPLE,
+                    DeviceCatalog.storage_gb.is_not(None),
+                )
                 .order_by(MarketBaseline.sample_size.desc())
                 .limit(limit)
             )
@@ -443,7 +516,41 @@ async def learning_overview(limit: int = 8) -> dict:
         }
         for b, m, st, price, sample in rows
     ]
-    return {"devices": int(total), "with_baseline": len(top), "top": top}
+    return {"devices": int(total), "with_baseline": int(with_baseline), "top": top}
+
+
+async def relearn_stale_baselines(limit: int = 50) -> dict[str, int]:
+    """Recompute the oldest/stale learned devices from the dev panel.
+
+    This is intentionally bounded: it gives the owner a safe maintenance
+    button without turning a Telegram click into a full database rebuild.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(
+        seconds=config.BASELINE_REFRESH_SEC
+    )
+    async with get_session() as s:
+        rows = (
+            await s.execute(
+                select(MarketBaseline.device_id)
+                .where(
+                    MarketBaseline.condition == WORKING_CONDITION,
+                    or_(
+                        MarketBaseline.updated_at.is_(None),
+                        MarketBaseline.updated_at < cutoff,
+                    ),
+                )
+                .order_by(MarketBaseline.updated_at.asc())
+                .limit(limit)
+            )
+        ).scalars().all()
+
+    checked = 0
+    changed = 0
+    for device_id in dict.fromkeys(int(x) for x in rows):
+        checked += 1
+        if await relearn(device_id) is not None:
+            changed += 1
+    return {"checked": checked, "relearned": changed}
 
 
 async def device_summary(device_id: int) -> tuple[str, dict[str, int]]:

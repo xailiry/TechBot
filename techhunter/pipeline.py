@@ -32,14 +32,17 @@ async def process_new_listing(
         log.debug("fetch_details failed for %s: %s", item.id, e)
 
     report = await evaluate_listing(item, run_clip=False, do_dedup=False)
-    valuation = await value_listing(item, report)
+    valuation = await value_listing(item, report, log_obs=False)
 
     # Heavy visual + photo-reuse check only for promising lots.
     if valuation.opportunity and config.CLIP_ENABLED:
         try:
             report = await evaluate_listing(item, run_clip=True, do_dedup=True)
-            valuation = await value_listing(item, report, log_obs=False)
+            valuation = await value_listing(item, report, log_obs=True)
         except Exception as e:
             log.debug("CLIP refine failed for %s: %s", item.id, e)
+            valuation = await value_listing(item, report, log_obs=True)
+    else:
+        valuation = await value_listing(item, report, log_obs=True)
 
     return report, valuation

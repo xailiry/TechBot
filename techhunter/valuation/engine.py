@@ -18,6 +18,7 @@ from .devices import (
     get_condition_baselines,
     get_model_working_meta,
     get_or_create_device,
+    get_storage_working_meta,
     get_working_meta,
     log_observation,
 )
@@ -30,8 +31,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-_WORKING = {"ideal", "good"}
-
+from ..ai.condition import Condition
 
 def _iphone_generation(model: str | None) -> int | None:
     if not model:
@@ -147,9 +147,8 @@ async def fast_value_listing(
         )
         if baseline is None or sample < config.BASELINE_MIN_SAMPLE:
             return "learn"
-        market = baseline * (1 - config.PROFIT_HAGGLE_PERCENT)
         limit = market * config.FAST_VALUATION_THRESHOLD_PCT
-        return "deal" if (item.price > 0 and item.price < limit) else "skip"
+        return "deal" if ((item.price or 0) > 0 and (item.price or 0) < limit) else "skip"
 
     device_id = await get_or_create_device(
         norm.brand, norm.model, norm.storage_gb, norm.ram_gb
@@ -158,14 +157,20 @@ async def fast_value_listing(
         return "skip"  # unresolved brand -> cannot value or learn it
 
     baseline, sample, _ = await get_working_meta(device_id)
+    if (
+        (baseline is None or sample < config.BASELINE_MIN_SAMPLE)
+        and norm.storage_gb is not None
+    ):
+        baseline, sample, _variants = await get_storage_working_meta(
+            norm.brand, norm.model, norm.storage_gb, norm.ram_gb
+        )
     if baseline is None or sample < config.BASELINE_MIN_SAMPLE:
         return "learn"  # insufficient data -> grow the baseline
 
     # If it's cheaper than (market * (1 - haggle) * threshold), it's a candidate.
-    # We use a loose threshold because we don't know the condition yet.
     market = baseline * (1 - config.PROFIT_HAGGLE_PERCENT)
     limit = market * config.FAST_VALUATION_THRESHOLD_PCT
-    return "deal" if (item.price > 0 and item.price < limit) else "skip"
+    return "deal" if ((item.price or 0) > 0 and (item.price or 0) < limit) else "skip"
 
 
 async def learn_from_card_device(
@@ -313,6 +318,15 @@ async def value_listing(
     baseline = None
     if device_id is not None:
         baseline, sample, age = await get_working_meta(device_id)
+        if (
+            baseline is None
+            and report.storage_gb is not None
+            and report.model
+        ):
+            baseline, sample, _variants = await get_storage_working_meta(
+                report.brand, report.model, report.storage_gb, report.ram_gb
+            )
+            age = 0.0
         v.baseline_price = baseline
         v.baseline_sample = sample
         if baseline is None:
@@ -329,7 +343,7 @@ async def value_listing(
         v.condition_baselines = await get_condition_baselines(device_id)
 
     comparison_baseline = baseline
-    if report.condition in _WORKING:
+    if Condition(report.condition).is_working:
         tier_baseline = v.condition_baselines.get(report.condition)
         if tier_baseline:
             comparison_baseline = tier_baseline
@@ -364,7 +378,7 @@ async def value_listing(
     # Honest market price: median minus expected haggle.
     market = comparison_baseline * (1 - config.PROFIT_HAGGLE_PERCENT)
 
-    if item.price > 0:
+    if (item.price or 0) > 0:
         v.gross_profit = int(market - item.price)
 
     overhead = config.PROFIT_OVERHEAD_RUB
@@ -372,13 +386,13 @@ async def value_listing(
     market_badge_conflict = (
         bool(getattr(item, "avito_market_badge", False))
         and getattr(item, "avito_price_badge", None) in (None, "market")
-        and cond in _WORKING
-        and item.price > 0
+        and Condition(cond).is_working
+        and (item.price or 0) > 0
         and comparison_baseline > 0
-        and (item.price / comparison_baseline) <= config.AVITO_MARKET_BADGE_CONFLICT_RATIO
+        and ((item.price or 0) / comparison_baseline) <= config.AVITO_MARKET_BADGE_CONFLICT_RATIO
     )
 
-    if cond in _WORKING:
+    if Condition(cond).is_working:
         if v.gross_profit is not None:
             v.net_profit = v.gross_profit - overhead
             v.opportunity_type = "working"
@@ -400,14 +414,14 @@ async def value_listing(
         elif not breakdown:
             defect_baseline = v.condition_baselines.get("defect")
             if cond == "defect" and defect_baseline is not None:
-                if item.price > 0:
+                if (item.price or 0) > 0:
                     v.net_profit = int(defect_baseline * (1 - config.PROFIT_HAGGLE_PERCENT)) - item.price - overhead
                     v.opportunity_type = "working"
             else:
                 missing.append("condition_discount_unknown")
         else:
             v.repair_cost = total
-            if item.price > 0:
+            if (item.price or 0) > 0:
                 v.net_profit = int(market - item.price - total - overhead)
                 v.opportunity_type = "broken_flip"
 

@@ -96,6 +96,17 @@ def test_specs() -> None:
     check("fallback ram 12", s7.ram_gb == 12)
     check("fallback storage 512", s7.storage_gb == 512)
 
+    s7b = extract_specs("iPhone 15 Pro Max 1 ТБ", "")
+    check("title 1 TB -> 1024", s7b.storage_gb == 1024)
+    s7c = extract_specs("iPhone 17 Pro Max 2 ТБ", "")
+    check("title 2 TB -> 2048", s7c.storage_gb == 2048)
+    s7d = extract_specs("Samsung Galaxy S25 Ultra 12/1 ТБ", "")
+    check("ram/tb ram 12", s7d.ram_gb == 12)
+    check("ram/tb storage 1024", s7d.storage_gb == 1024)
+    s7e = extract_specs("Samsung Galaxy S25 Ultra 12/256 ГБ", "")
+    check("ram/gb ram 12", s7e.ram_gb == 12)
+    check("ram/gb storage 256", s7e.storage_gb == 256)
+
     s8 = extract_specs(
         "iPhone 12 Pro 128 ГБ",
         "Корпус и экран в идеале, но есть полоса",

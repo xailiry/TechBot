@@ -94,7 +94,10 @@ class DeviceCatalog(Base):
 
     __tablename__ = "device_catalog"
     __table_args__ = (
-        UniqueConstraint("brand", "model", "storage_gb", name="uq_device_identity"),
+        UniqueConstraint(
+            "brand", "model", "storage_gb", "ram_gb",
+            name="uq_device_identity",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -244,6 +247,8 @@ class PendingAlert(Base):
     attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     last_error: Mapped[str | None] = mapped_column(Text)
     last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    dead_reason: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -277,6 +282,7 @@ class CardState(Base):
     tg_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     message_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     item_json: Mapped[str] = mapped_column(Text)
+    report_json: Mapped[str | None] = mapped_column(Text)
     score_json: Mapped[str] = mapped_column(Text)
     sub_query: Mapped[str | None] = mapped_column(String(256))
     created_at: Mapped[datetime] = mapped_column(
@@ -292,6 +298,8 @@ class DealFeedback(Base):
     tg_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     listing_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     reaction: Mapped[str] = mapped_column(String(8))  # up | down
+    reason: Mapped[str | None] = mapped_column(String(32))
+    feature_json: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=_utcnow
     )

@@ -167,6 +167,12 @@ async def test_devices_baseline() -> None:
     d2 = await get_or_create_device("apple", model, 256)
     check("device id stable", d1 == d1b)
     check("storage differs -> new device", d1 != d2)
+    ram_model = f"Galaxy S25 Ultra TEST {tag}"
+    r8 = await get_or_create_device("samsung", ram_model, 256, 8)
+    r12 = await get_or_create_device("samsung", ram_model, 256, 12)
+    r12b = await get_or_create_device("samsung", ram_model, 256, 12)
+    check("ram differs -> new android device", r8 != r12)
+    check("ram id stable", r12 == r12b)
     check("unknown brand -> None",
           await get_or_create_device("unknown", "", None) is None)
 
@@ -181,6 +187,12 @@ async def test_devices_baseline() -> None:
           await log_observation(did_once, "good", 50000, listing_id="same-1"))
     check("duplicate observation skipped",
           not await log_observation(did_once, "good", 50000, listing_id="same-1"))
+    check("changed price updates observation",
+          await log_observation(did_once, "good", 51000, listing_id="same-1"))
+    from techhunter.valuation.devices import _prices  # noqa: PLC2701
+    changed_prices = await _prices(did_once, ("good",))
+    check("old changed-price observation removed", 50000 not in changed_prices)
+    check("new changed-price observation present", 51000 in changed_prices)
 
     # Enough real obs incl. scam lows -> learns the genuine cluster.
     for p in (60000, 61000, 59000, 62000, 60500, 59500, 61500, 5000, 5500, 60200, 61100, 59800, 61200):

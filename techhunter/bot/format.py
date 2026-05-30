@@ -71,6 +71,39 @@ def fmt_price(n: int | None) -> str:
     return f"{int(n):,}".replace(",", " ") + " ₽"
 
 
+def _deal_badges(item, report, valuation) -> list[str]:
+    badges: list[str] = []
+    avito_badge = getattr(item, "avito_price_badge", None)
+    if avito_badge == "below":
+        badges.append("ниже рынка")
+    elif avito_badge == "above":
+        badges.append("выше рынка")
+    elif getattr(item, "avito_market_badge", False):
+        badges.append("рыночная цена")
+
+    if getattr(valuation, "shoplike", False):
+        badges.append("магазин/перекуп")
+    else:
+        seller_text = " ".join(
+            str(x or "").lower()
+            for x in (
+                getattr(item, "seller_type", None),
+                getattr(item, "seller_label", None),
+                *getattr(valuation, "pros", []),
+            )
+        )
+        if "част" in seller_text or "private" in seller_text:
+            badges.append("частник")
+
+    if getattr(valuation, "scam_score", 100) < 70 or getattr(valuation, "cons", None):
+        badges.append("риск")
+    if getattr(report, "condition", "") in ("broken", "defect", "for_parts"):
+        badges.append("битый/ремонт")
+    if getattr(report, "defects", None):
+        badges.append("дефекты")
+    return badges[:5]
+
+
 def format_deal_card(item, report, valuation, sub_query: str = "") -> str:
     """Redesigned card: a profit headline up top, then market, condition,
     seller, trust, and specs. Scannable in ~2 seconds."""
@@ -87,7 +120,11 @@ def format_deal_card(item, report, valuation, sub_query: str = "") -> str:
     if report.is_rostest and "rst" not in title.lower() and "ростест" not in title.lower():
         title += " [RST]"
     
-    lines: list[str] = [f"{sv_emoji} <b>{esc(title)}</b>", ""]
+    lines: list[str] = [f"{sv_emoji} <b>{esc(title)}</b>"]
+    badges = _deal_badges(item, report, valuation)
+    if badges:
+        lines.append("🏷 " + " · ".join(esc(b) for b in badges))
+    lines.append("")
 
     # 1. Headline: price + profit (the reason this lot was sent).
     lines.append(f"💰 <b>{fmt_price(item.price)}</b>   {c_emoji} {c_label}")

@@ -88,6 +88,19 @@ async def test_verdict_uses_model_fallback_without_storage() -> None:
     check("no storage no fallback -> learn/detail", unknown == "learn")
 
 
+async def test_android_missing_ram_uses_storage_fallback() -> None:
+    dev_id = await get_or_create_device(
+        "samsung", "Galaxy S25 Ultra", 256, 12
+    )
+    await set_manual_baseline(dev_id, 60000)
+
+    verdict = await fast_value_listing(
+        _item("d2-ram-fallback", "Samsung Galaxy S25 Ultra 256GB", 45000),
+        is_discovery=True,
+    )
+    check("android no-ram title uses storage fallback", verdict == "deal")
+
+
 async def test_verdict_deal_vs_skip_with_baseline() -> None:
     title = "iPhone 13 Pro 128GB"
     dev_id = await _resolve_device(title)
@@ -232,7 +245,7 @@ async def test_storage_missing_opens_detail_for_learning() -> None:
     orig = monitor.process_new_listing
     monitor.process_new_listing = _fake_process  # type: ignore
     try:
-        item = _item("d7b", "Samsung Galaxy S25 Ultra", 65000)
+        item = _item("d7b", "Samsung Galaxy S25 Ultra", 40000)
         budget = {"n": 1}
         counters = {"errors": 0, "processed": 0, "cached": 0}
         await monitor._evaluate(
@@ -351,6 +364,9 @@ async def test_discovery_threshold_controls() -> None:
     check("profit increase button", "disc:profit:1000" in cbs)
     check("ratio decrease button", "disc:ratio:-5" in cbs)
     check("ratio increase button", "disc:ratio:5" in cbs)
+    check("strict preset", "disc:preset:strict" in cbs)
+    check("balance preset", "disc:preset:balance" in cbs)
+    check("aggressive preset", "disc:preset:aggressive" in cbs)
 
 
 async def test_learned_devices_screen() -> None:
@@ -372,7 +388,7 @@ async def test_learned_devices_screen() -> None:
           not any("NULLMEM" in l for l in labels))
 
     text, _ = await screen_learned(0)
-    check("learned screen header", "Что бот знает" in text)
+    check("learned screen header", "База цен" in text)
     check("learned screen shows samples", "выборка" in text)
 
 
@@ -488,10 +504,99 @@ async def test_fast_poll_uses_hot_scan_window() -> None:
         monitor._onboard_inprogress.update(orig_inprogress)  # noqa: SLF001
 
 
+async def test_deep_poll_starts_after_fast_window() -> None:
+    calls: list[dict] = []
+
+    class FakeBrowser:
+        def __init__(self) -> None:
+            self.paused = asyncio.Event()
+
+        async def search(self, *args, **kwargs):
+            calls.append({"args": args, "kwargs": kwargs})
+            return []
+
+    discovery_user = SimpleNamespace(
+        tg_id=3,
+        discovery_min_profit_rub=None,
+        discovery_min_profit_ratio=None,
+    )
+
+    async def one_discovery_user():
+        return [discovery_user]
+
+    orig_discovery = monitor.discovery_users
+    orig_fast_pages = config.FAST_SCAN_PAGES
+    orig_deep_pages = config.DEEP_SCAN_PAGES
+    try:
+        config.FAST_SCAN_PAGES = 3
+        config.DEEP_SCAN_PAGES = 12
+        monitor.discovery_users = one_discovery_user  # type: ignore[assignment]
+        await monitor.poll_deep(FakeBrowser(), object())
+    finally:
+        monitor.discovery_users = orig_discovery  # type: ignore[assignment]
+        config.FAST_SCAN_PAGES = orig_fast_pages
+        config.DEEP_SCAN_PAGES = orig_deep_pages
+
+    check("deep starts at page 4", calls[-1]["kwargs"]["start_page"] == 4)
+    check("deep scans remaining pages", calls[-1]["kwargs"]["pages"] == 9)
+    check("deep uses deep browser pool", calls[-1]["kwargs"]["mode"] == "deep")
+
+
+async def test_training_mode_skips_fast_and_deep() -> None:
+    calls: list[dict] = []
+
+    class FakeBrowser:
+        def __init__(self) -> None:
+            self.paused = asyncio.Event()
+
+        async def search(self, *args, **kwargs):
+            calls.append({"args": args, "kwargs": kwargs})
+            return []
+
+    now = datetime.now(timezone.utc)
+    sub = SimpleNamespace(
+        id=903,
+        tg_id=1,
+        query="iphone",
+        city_slug="rossiya",
+        min_price=None,
+        max_price=None,
+        search_pages=None,
+        onboarded_at=now,
+    )
+    discovery_user = SimpleNamespace(
+        tg_id=4,
+        discovery_min_profit_rub=None,
+        discovery_min_profit_ratio=None,
+    )
+
+    async def one_sub():
+        return [sub]
+
+    async def one_discovery_user():
+        return [discovery_user]
+
+    orig_active = monitor.active_subscriptions
+    orig_discovery = monitor.discovery_users
+    try:
+        monitor.active_subscriptions = one_sub  # type: ignore[assignment]
+        monitor.discovery_users = one_discovery_user  # type: ignore[assignment]
+        monitor.runtime.set_training_mode(True)
+        await monitor.poll_fast(FakeBrowser(), object())
+        await monitor.poll_deep(FakeBrowser(), object())
+    finally:
+        monitor.runtime.set_training_mode(False)
+        monitor.active_subscriptions = orig_active  # type: ignore[assignment]
+        monitor.discovery_users = orig_discovery  # type: ignore[assignment]
+
+    check("training skips fast/deep searches", calls == [])
+
+
 def main() -> None:
     asyncio.run(test_verdict_skip_unrecognized())
     asyncio.run(test_verdict_learn_without_baseline())
     asyncio.run(test_verdict_uses_model_fallback_without_storage())
+    asyncio.run(test_android_missing_ram_uses_storage_fallback())
     asyncio.run(test_verdict_deal_vs_skip_with_baseline())
     asyncio.run(test_iphone_16e_does_not_use_iphone_16_baseline())
     asyncio.run(test_learn_uses_card_not_detail())
@@ -507,6 +612,8 @@ def main() -> None:
     asyncio.run(test_learned_devices_screen())
     asyncio.run(test_blocked_phone_not_a_deal())
     asyncio.run(test_fast_poll_uses_hot_scan_window())
+    asyncio.run(test_deep_poll_starts_after_fast_window())
+    asyncio.run(test_training_mode_skips_fast_and_deep())
     print("\nAll discovery checks passed.")
 
 

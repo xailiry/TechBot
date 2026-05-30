@@ -8,11 +8,7 @@ from aiogram import Bot
 
 from .. import config
 from ..notifier import _beep
-from ..storage import (
-    alert_already_sent,
-    all_user_ids,
-    mark_alert_sent,
-)
+from ..storage import all_user_ids
 from .cards import send_deal_card
 from .format import onboarding_done_text, onboarding_started_text
 
@@ -29,19 +25,28 @@ class TelegramNotifier:
             return list(config.ADMIN_USER_IDS)
         return await all_user_ids()
 
-    async def _broadcast(self, text: str) -> None:
+    async def _broadcast(self, text: str) -> tuple[int, int]:
+        delivered = 0
+        failed = 0
         for uid in await self._operator_ids():
-            with contextlib.suppress(Exception):
+            try:
                 await self.bot.send_message(uid, text, parse_mode="HTML")
+                delivered += 1
+            except Exception as e:
+                failed += 1
+                log.warning("Telegram broadcast failed for %s: %s", uid, e)
+        return delivered, failed
 
     async def captcha_detected(self, url: str) -> None:
         log.error("CAPTCHA detected. Manual solve needed. %s", url)
         if self._beep:
             await asyncio.to_thread(_beep)
-        await self._broadcast(
+        delivered, _failed = await self._broadcast(
             "🧩 <b>Капча на Avito</b>\nРеши её вручную в открытом окне "
             "браузера — монитор продолжит сам."
         )
+        if delivered == 0:
+            raise RuntimeError("captcha notification was not delivered")
 
     async def captcha_cleared(self) -> None:
         log.info("Captcha cleared, monitor resumed.")
@@ -56,19 +61,8 @@ class TelegramNotifier:
     ) -> None:
         if tg_id is None:
             return
-        if await alert_already_sent(tg_id, item.id):
-            return
         await send_deal_card(
             self.bot, tg_id, item, report, valuation, sub_query or ""
-        )
-        await mark_alert_sent(
-            tg_id,
-            item.id,
-            price=item.price,
-            profit=valuation.net_profit,
-            verdict=valuation.scam_verdict,
-            condition=valuation.condition,
-            sub_query=sub_query,
         )
 
     async def onboarding_started(
