@@ -12,16 +12,14 @@ import logging
 import os
 import random
 import time
-from typing import TYPE_CHECKING
 
 from playwright.async_api import BrowserContext, Page, async_playwright
 
 from .. import config
+from ..notifier import Notifier
 from .models import ParsedListing
 from .session import SessionManager
 
-if TYPE_CHECKING:
-    from ..notifier import Notifier
 from .parser import has_detail, has_listings, page_blocked, parse_detail, parse_listings
 from .stealth import DESKTOP_UA, STEALTH_INIT
 from .urls import build_search_url
@@ -30,15 +28,24 @@ log = logging.getLogger(__name__)
 
 
 class AvitoBrowser:
-    def __init__(self, session_manager: SessionManager) -> None:
-        self.session = session_manager
+    def __init__(
+        self,
+        session_manager: SessionManager | None = None,
+        *,
+        notifier: Notifier | None = None,
+    ) -> None:
+        self.session = session_manager or SessionManager(notifier)
         self._pw = None
         self._ctx: BrowserContext | None = None
-        self._pool: asyncio.Queue[Page] = asyncio.Queue()
+        self._fast_pool: asyncio.Queue[Page] = asyncio.Queue()
+        self._deep_pool: asyncio.Queue[Page] = asyncio.Queue()
+        self._pool: asyncio.Queue[Page] = self._fast_pool
         self._profile_lock_file = None
         self._lock = asyncio.Lock()
         self._restart_lock = asyncio.Lock()
         self._last_restart = 0.0
+        self._last_captcha_notify = 0.0
+        self._captcha_solved_page: Page | None = None
 
     @staticmethod
     def _is_closed_error(err: object) -> bool:
@@ -136,15 +143,13 @@ class AvitoBrowser:
             await self._ctx.add_init_script(STEALTH_INIT)
             from playwright_stealth import Stealth
 
-            # Empty existing queue instead of replacing it
-            while not self._pool.empty():
-                try:
-                    self._pool.get_nowait()
-                except asyncio.QueueEmpty:
-                    break
+            self._fast_pool = asyncio.Queue()
+            self._deep_pool = asyncio.Queue()
+            self._pool = self._fast_pool
 
             existing = list(self._ctx.pages)
             total_pages = max(1, config.PAGE_POOL_SIZE)
+            fast_pages = min(max(1, config.FAST_WORKERS), total_pages)
             
             for i in range(total_pages):
                 if i < len(existing):
@@ -154,7 +159,10 @@ class AvitoBrowser:
                 else:
                     page = await self._new_stealth_page()
 
-                self._pool.put_nowait(page)
+                if i < fast_pages:
+                    self._fast_pool.put_nowait(page)
+                else:
+                    self._deep_pool.put_nowait(page)
 
             if len(existing) > config.PAGE_POOL_SIZE:
                 for page in existing[config.PAGE_POOL_SIZE:]:
@@ -212,6 +220,40 @@ class AvitoBrowser:
         with contextlib.suppress(Exception):
             lock_file.close()
 
+    def _select_pool(self, mode: str) -> asyncio.Queue[Page]:
+        if hasattr(self, "_available"):
+            return self._available
+        if mode == "deep":
+            return self._deep_pool if self._deep_pool is not None else self._pool
+        return self._fast_pool if self._fast_pool is not None else self._pool
+
+    async def _close_page(self, page: Page) -> None:
+        with contextlib.suppress(Exception):
+            await page.close()
+
+    async def _reload(self, page: Page) -> None:
+        await page.reload(wait_until="domcontentloaded", timeout=config.NAV_TIMEOUT_MS)
+
+    async def _run_captcha_wait(self, url: str) -> bool:
+        async def _no_page_probe() -> bool:
+            return False
+
+        return await self.session.handle_captcha(url, _no_page_probe)
+
+    async def _notify_captcha_detected(self, url: str, force: bool = False) -> bool:
+        # Compatibility wrapper for tests and older call sites; the real
+        # throttle state lives in SessionManager.
+        self.session._last_notify = self._last_captcha_notify
+        ok = await self.session._notify(url, force=force)
+        self._last_captcha_notify = self.session._last_notify
+        return ok
+
+    async def _ensure_unblocked(self, page: Page, url: str) -> bool:
+        ok = await self._run_captcha_wait(url)
+        if ok and page is not self._captcha_solved_page:
+            await self._reload(page)
+        return ok
+
     @contextlib.asynccontextmanager
     async def acquire_page(self, mode: str = "fast"):
         await self.start()
@@ -219,28 +261,43 @@ class AvitoBrowser:
         while self.session.is_paused:
             await self.session.wait_for_unblock()
             
-        page = await self._pool.get()
+        pool = self._select_pool(mode)
+        transient = False
+        try:
+            page = await asyncio.wait_for(
+                pool.get(),
+                timeout=max(0.0, config.PAGE_ACQUIRE_TIMEOUT_SEC),
+            )
+        except asyncio.TimeoutError:
+            page = await self._new_stealth_page()
+            transient = True
         try:
             if self._is_page_closed(page):
                 page = await self._new_stealth_page()
+                transient = True
             yield page
         except Exception as e:
             await self._maybe_restart(e)
             raise
         finally:
-            if self._is_page_closed(page):
+            current_pool = self._select_pool(mode)
+            if transient or pool is not current_pool:
+                await self._close_page(page)
+            elif self._is_page_closed(page):
                 try:
-                    page = await self._new_stealth_page()
+                    current_pool.put_nowait(await self._new_stealth_page())
                 except Exception as e:
                     log.error("acquire_page: failed to replace dead page: %s", e)
-            self._pool.put_nowait(page)
+            else:
+                current_pool.put_nowait(page)
 
     # ─── search ─────────────────────────────────────────────────────────────
 
     async def _handle_captcha(self, page: Page, url: str, is_detail: bool) -> bool:
         async def check_cleared() -> bool:
             try:
-                if self._is_page_closed(page): return False
+                if self._is_page_closed(page):
+                    return False
                 await page.reload(wait_until="domcontentloaded", timeout=config.NAV_TIMEOUT_MS)
                 html = await page.content()
                 return has_detail(html) if is_detail else has_listings(html)

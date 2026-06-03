@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel, Field
 
 from .. import config
+from ..ai.condition import Condition
 from .devices import (
     get_condition_baselines,
     get_model_working_meta,
@@ -30,8 +31,6 @@ if TYPE_CHECKING:
     from ..scraper.models import ParsedListing
 
 log = logging.getLogger(__name__)
-
-from ..ai.condition import Condition
 
 def _iphone_generation(model: str | None) -> int | None:
     if not model:
@@ -278,7 +277,6 @@ async def learn_from_detail(
 
 
 async def value_listing(
-
     item: "ParsedListing", report: "EvaluationReport", *, log_obs: bool = True
 ) -> Valuation:
     v = Valuation(listing_id=item.id, condition=report.condition)
@@ -415,7 +413,11 @@ async def value_listing(
             defect_baseline = v.condition_baselines.get("defect")
             if cond == "defect" and defect_baseline is not None:
                 if (item.price or 0) > 0:
-                    v.net_profit = int(defect_baseline * (1 - config.PROFIT_HAGGLE_PERCENT)) - item.price - overhead
+                    v.net_profit = (
+                        int(defect_baseline * (1 - config.PROFIT_HAGGLE_PERCENT))
+                        - item.price
+                        - overhead
+                    )
                     v.opportunity_type = "working"
             else:
                 missing.append("condition_discount_unknown")

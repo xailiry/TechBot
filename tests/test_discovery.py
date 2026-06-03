@@ -382,10 +382,10 @@ async def test_learned_devices_screen() -> None:
     await set_manual_baseline(d3, 50000)
 
     labels = [d["label"] for d in await learned_devices(limit=200)]
-    check("iPhone in learned list", any("iPhone 11 Pro" in l for l in labels))
-    check("Honor in learned list", any("Honor 90" in l for l in labels))
+    check("iPhone in learned list", any("iPhone 11 Pro" in label for label in labels))
+    check("Honor in learned list", any("Honor 90" in label for label in labels))
     check("no-memory hidden from learned list",
-          not any("NULLMEM" in l for l in labels))
+          not any("NULLMEM" in label for label in labels))
 
     text, _ = await screen_learned(0)
     check("learned screen header", "База цен" in text)

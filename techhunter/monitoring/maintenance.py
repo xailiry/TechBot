@@ -47,7 +47,12 @@ class MaintenanceTasks:
                 )
             except Exception as e:
                 last_error = str(e)
-                await self.repos.alerts.mark_pending_failed(tg_id, listing_id, str(e))
+                await self.repos.alerts.mark_pending_failed(
+                    tg_id,
+                    listing_id,
+                    str(e),
+                    dead_reason=_is_permanent_delivery_error(e),
+                )
                 log.warning("Pending deal delivery failed for %s to %s: %s", listing_id, tg_id, e)
                 continue
             

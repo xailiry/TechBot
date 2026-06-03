@@ -71,6 +71,26 @@ def fmt_price(n: int | None) -> str:
     return f"{int(n):,}".replace(",", " ") + " ₽"
 
 
+def _hard_reseller_signal(item, valuation) -> bool:
+    seller_type = getattr(item, "seller_type", None)
+    seller_listings = getattr(item, "seller_listings", None)
+    seller_reviews = getattr(item, "seller_reviews", None)
+    if seller_type in {"shop", "company"}:
+        return True
+    if seller_listings is not None and seller_listings >= 30:
+        return True
+    if (
+        seller_type == "private"
+        and seller_listings is not None
+        and seller_reviews is not None
+        and seller_listings >= 5
+        and seller_reviews >= 20
+    ):
+        return True
+    cons_text = " ".join(str(c).lower() for c in getattr(valuation, "cons", []))
+    return any(x in cons_text for x in ("магазин", "перекуп", "выкуп", "скупка"))
+
+
 def _deal_badges(item, report, valuation) -> list[str]:
     badges: list[str] = []
     avito_badge = getattr(item, "avito_price_badge", None)
@@ -82,7 +102,10 @@ def _deal_badges(item, report, valuation) -> list[str]:
         badges.append("рыночная цена")
 
     if getattr(valuation, "shoplike", False):
-        badges.append("магазин/перекуп")
+        if _hard_reseller_signal(item, valuation):
+            badges.append("магазин/перекуп")
+        else:
+            badges.append("розничные маркеры")
     else:
         seller_text = " ".join(
             str(x or "").lower()

@@ -17,12 +17,12 @@ _IPHONE_RE = re.compile(
     re.I,
 )
 _SAMSUNG_S_RE = re.compile(
-    r"(?:galaxy|галакси|samsung|самсунг)?\s*\bs\s*?(\d{2})\s*"
+    r"(?:galaxy|галакси|samsung|самсунг)?\s*\b[sс]\s*?(\d{2})\s*"
     r"(ultra|plus|fe|ультра|\+)?",
     re.I,
 )
 _SAMSUNG_A_RE = re.compile(
-    r"(?:galaxy|галакси|samsung|самсунг)?\s*\ba\s*?(\d{2})\s*"
+    r"(?:galaxy|галакси|samsung|самсунг)?\s*\b[aа]\s*?(\d{2})\s*"
     r"(s|core|ultra|plus|fe|\+)?",
     re.I,
 )
@@ -33,7 +33,8 @@ _SAMSUNG_NOTE_RE = re.compile(
     r"(?:galaxy\s*)?note\s*(\d{1,2})\s*(ultra|ультра)?", re.I
 )
 _PIXEL_RE = re.compile(
-    r"(?:pixel|пиксель)\s*(\d{1,2})\s*(pro\s*xl|pro|xl|a)?", re.I
+    r"(?:pixel|пиксель)\s*(\d{1,2})\s*(pro\s*xl|про\s*xl|pro|про|xl|a|а)?",
+    re.I,
 )
 _XIAOMI_RE = re.compile(
     r"(?:xiaomi|сяоми|сиаоми|ми)\s*(\d{1,2})\s*(t|pro|ultra|lite|i|x)?", re.I
@@ -157,6 +158,7 @@ def _pixel_model(text: str) -> str | None:
     if not m:
         return None
     suffix = (m.group(2) or "").lower().replace(" ", "")
+    suffix = suffix.replace("про", "pro").replace("а", "a")
     tail = {"proxl": " Pro XL", "pro": " Pro", "xl": " XL", "a": "a"}.get(suffix, "")
     if tail == "a":
         return f"Pixel {m.group(1)}a"
@@ -302,13 +304,24 @@ def normalize_device(
             _huawei_model(text)
         )
         if model:
-            if model.startswith("iPhone"): brand = "apple"
-            elif model.startswith("Pixel"): brand = "google"
-            elif model.startswith("Galaxy"): brand = "samsung"
-            elif model.startswith("Redmi") or model.startswith("Poco") or model.startswith("Xiaomi"): brand = "xiaomi"
-            elif model.startswith("OnePlus"): brand = "oneplus"
-            elif model.startswith("Honor"): brand = "honor"
-            elif model.startswith("Huawei"): brand = "huawei"
+            if model.startswith("iPhone"):
+                brand = "apple"
+            elif model.startswith("Pixel"):
+                brand = "google"
+            elif model.startswith("Galaxy"):
+                brand = "samsung"
+            elif (
+                model.startswith("Redmi")
+                or model.startswith("Poco")
+                or model.startswith("Xiaomi")
+            ):
+                brand = "xiaomi"
+            elif model.startswith("OnePlus"):
+                brand = "oneplus"
+            elif model.startswith("Honor"):
+                brand = "honor"
+            elif model.startswith("Huawei"):
+                brand = "huawei"
 
 
     version = _detect_version(text)

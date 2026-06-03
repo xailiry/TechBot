@@ -1,10 +1,11 @@
 """aiogram bot: button-first UI with a single-message hub, Back everywhere,
 guided add, per-user delivery filters. Commands remain as shortcuts."""
+import asyncio
 import contextlib
 import logging
 
 from aiogram import BaseMiddleware, Bot, Dispatcher, F
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError
 from aiogram.filters import BaseFilter, Command, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -135,13 +136,28 @@ async def _answer_cb(cb: CallbackQuery, *args, **kwargs) -> None:
         raise
 
 
+async def _answer_msg(msg: Message, *args, retries: int = 2, **kwargs) -> None:
+    """Retry transient Telegram send failures so commands do not look ignored."""
+    for attempt in range(retries + 1):
+        try:
+            await msg.answer(*args, **kwargs)
+            return
+        except TelegramNetworkError as e:
+            if attempt >= retries:
+                log.warning("message answer failed after %s attempts: %s", attempt + 1, e)
+                raise
+            delay = float(attempt + 1)
+            log.warning("message answer failed, retrying in %.1fs: %s", delay, e)
+            await asyncio.sleep(delay)
+
+
 @dp.message(CommandStart())
 @dp.message(Command("menu"))
 async def cmd_menu(msg: Message, state: FSMContext) -> None:
     await state.clear()
     await upsert_user(msg.from_user.id, msg.from_user.username)
     text, kb = await screen_hub(msg.from_user.id)
-    await msg.answer(text, parse_mode="HTML", reply_markup=kb)
+    await _answer_msg(msg, text, parse_mode="HTML", reply_markup=kb)
 
 
 @dp.message(Command("help"))

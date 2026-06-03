@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 from .. import config
 from ..scraper.models import ParsedListing
 from .clip_engine import get_clip_engine, interpret_visual
-from .condition import Condition, grade_condition
+from .condition import grade_condition
 from .images import dhash_bytes, download_image_bytes
 from .normalize import normalize_device
 from .specs import extract_specs

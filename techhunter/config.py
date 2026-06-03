@@ -124,6 +124,7 @@ WATCHDOG_REPEAT_SEC = int(os.getenv("WATCHDOG_REPEAT_SEC", "3600"))
 # must not make the bot forget them forever.
 DELIVERY_RETRY_INTERVAL_SEC = int(os.getenv("DELIVERY_RETRY_INTERVAL_SEC", "60"))
 DELIVERY_RETRY_BATCH_SIZE = int(os.getenv("DELIVERY_RETRY_BATCH_SIZE", "8"))
+PENDING_ALERT_MAX_RETRIES = int(os.getenv("PENDING_ALERT_MAX_RETRIES", "6"))
 PENDING_ALERT_RETENTION_DAYS = int(os.getenv("PENDING_ALERT_RETENTION_DAYS", "2"))
 
 # ─── AI evaluation (Stage 2, local only) ────────────────────────────────────

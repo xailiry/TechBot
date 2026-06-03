@@ -8,7 +8,7 @@ importing specific functions or db models directly.
 import asyncio
 import json
 from datetime import datetime, timedelta, timezone
-from typing import Callable, AsyncContextManager, Any
+from typing import Callable, AsyncContextManager
 
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -19,10 +19,8 @@ from ..ai.images import hamming
 from .models import (
     CardState,
     DealFeedback,
-    DeviceCatalog,
     ImageHash,
     Listing,
-    MarketBaseline,
     PendingAlert,
     PriceObservation,
     SentAlert,
@@ -394,14 +392,28 @@ class AlertRepository:
                 )
             return out
 
-    async def mark_pending_failed(self, tg_id: int, listing_id: str, error: str) -> None:
+    async def mark_pending_failed(
+        self,
+        tg_id: int,
+        listing_id: str,
+        error: str,
+        *,
+        dead_reason: str | None = None,
+    ) -> None:
         async with self._sf() as s:
             row = await s.get(PendingAlert, (tg_id, listing_id))
             if row is not None:
                 row.attempts += 1
                 row.last_error = error
-                delay = min(3600, 15 * (2 ** (row.attempts - 1)))
-                row.next_attempt_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
+                row.last_attempt_at = datetime.now(timezone.utc)
+                if dead_reason:
+                    row.dead_reason = dead_reason
+                    row.next_attempt_at = None
+                    return
+                delay = min(3600, 60 * (2 ** min(row.attempts - 1, 5)))
+                row.next_attempt_at = datetime.now(timezone.utc) + timedelta(
+                    seconds=delay
+                )
                 if row.attempts >= config.PENDING_ALERT_MAX_RETRIES:
                     row.dead_reason = "max_retries"
 

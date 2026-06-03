@@ -158,6 +158,7 @@ def score_listing(
     visual = visual or {}
     defects = defects or []
     avito_price_badge = avito_price_badge or ("market" if avito_market_badge else None)
+    no_original = False
 
     fake = _any(full, _FAKE)
     if fake:
@@ -247,8 +248,6 @@ def score_listing(
     if visual.get("screen_cracked_visual") and _IDEAL_CLAIM.search(full):
         score -= 22
         cons.append("текст «идеал», но на фото разбитый экран")
-
-    no_original = False
 
     # Obfuscation: Latin lookalikes embedded in Cyrillic words. Honest
     # private sellers don't do this; resellers/scammers do.

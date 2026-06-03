@@ -295,6 +295,72 @@ async def test_feedback_reason_filters_rebuilt_reseller() -> None:
     check("rebuilt drop reason", drops.get("feedback_reseller_rebuild") == 1)
 
 
+async def test_feedback_reason_filters_wrong_model() -> None:
+    from techhunter import monitor
+
+    lid = f"rel-{uuid.uuid4().hex}"
+    tg = 711700 + (uuid.uuid4().int % 1000)
+    item = _item(lid)
+    rep = EvaluationReport(
+        listing_id=lid,
+        brand="samsung",
+        model="Galaxy S23",
+        storage_gb=256,
+        condition="good",
+        defects=[],
+    )
+    val = Valuation(
+        listing_id=lid,
+        condition="good",
+        baseline_price=65000,
+        net_profit=12000,
+        profit_pct=0.20,
+        opportunity=True,
+        opportunity_type="working",
+        scam_score=75,
+        scam_verdict="unknown",
+    )
+    for i in range(2):
+        await record_feedback(
+            tg,
+            f"wrong-model-{i}-{uuid.uuid4().hex}",
+            "down",
+            reason="wrong_model",
+        )
+
+    class Target:
+        tg_id = tg
+        query = "iphone 13 pro 128"
+        min_battery = None
+
+    class Notifier:
+        calls = 0
+
+        async def deal(self, *args, **kwargs):
+            self.calls += 1
+
+    async def fake_evaluate(*args, **kwargs):
+        return rep, val
+
+    orig = monitor._evaluate
+    monitor._evaluate = fake_evaluate  # type: ignore
+    notifier = Notifier()
+    try:
+        counters = {"errors": 0, "processed": 0, "cached": 0,
+                    "deals": 0, "filtered": 0}
+        drops = {}
+        await monitor._handle_items(
+            object(), [item], Target(), notifier,
+            asyncio.Semaphore(1), {}, counters, drops, mode="fast",
+        )
+    finally:
+        monitor._evaluate = orig  # type: ignore
+
+    check("wrong model feedback filtered", notifier.calls == 0
+          and counters["filtered"] == 1)
+    check("wrong model drop reason", drops.get("feedback_wrong_model") == 1)
+
+
 async def test_subscription_battery_filter_applied() -> None:
     from techhunter import monitor
 
@@ -472,6 +538,7 @@ def main() -> None:
     asyncio.run(test_pending_alert_backoff_and_dead())
     asyncio.run(test_feedback_threshold_filters_noisy_user())
     asyncio.run(test_feedback_reason_filters_rebuilt_reseller())
+    asyncio.run(test_feedback_reason_filters_wrong_model())
     asyncio.run(test_subscription_battery_filter_applied())
     asyncio.run(test_pipeline_logs_only_after_final_evaluation())
     asyncio.run(test_sqlite_pragmas())

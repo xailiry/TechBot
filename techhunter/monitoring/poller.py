@@ -25,6 +25,46 @@ def _age_sec(dt) -> float:
     return (datetime.now(timezone.utc) - dt).total_seconds()
 
 
+def _new_counters() -> dict[str, int]:
+    return {
+        "scraped": 0,
+        "processed": 0,
+        "cached": 0,
+        "learning": 0,
+        "deals": 0,
+        "queued": 0,
+        "filtered": 0,
+        "errors": 0,
+    }
+
+
+def _log_cycle(
+    mode: str,
+    status: str,
+    *,
+    subs: int,
+    counters: dict[str, int],
+    drop_reasons: dict,
+) -> None:
+    drops = ", ".join(f"{k}={v}" for k, v in sorted(drop_reasons.items()))
+    log.info(
+        "%s cycle %s: subs=%s scraped=%s processed=%s cached=%s "
+        "learning=%s deals=%s queued=%s filtered=%s errors=%s%s",
+        mode,
+        status,
+        subs,
+        counters.get("scraped", 0),
+        counters.get("processed", 0),
+        counters.get("cached", 0),
+        counters.get("learning", 0),
+        counters.get("deals", 0),
+        counters.get("queued", 0),
+        counters.get("filtered", 0),
+        counters.get("errors", 0),
+        f" drops: {drops}" if drops else "",
+    )
+
+
 class AvitoPoller:
     def __init__(self, repos: RepositoryContainer, browser, notifier: Notifier):
         self.repos = repos
@@ -56,12 +96,14 @@ class AvitoPoller:
         device_ids: set[int] = set()
 
         async def _collect(it):
-            if time.time() > deadline: return
+            if time.time() > deadline:
+                return
             async with sem:
                 try:
                     it = await self.browser.fetch_details(it)
                     rep = await evaluate_listing(it, run_clip=False, do_dedup=False)
-                except Exception: return
+                except Exception:
+                    return
                 did = await get_or_create_device(rep.brand, rep.model or "", rep.storage_gb, rep.ram_gb)
                 if did is None or rep.is_sealed or looks_shoplike(it.title, it.description, it.seller_type, it.seller_listings, it.seller_reviews):
                     return
@@ -84,7 +126,8 @@ class AvitoPoller:
             for did in device_ids:
                 with contextlib.suppress(Exception):
                     label, tiers = await device_summary(did)
-                    if tiers: summary.append((label, tiers))
+                    if tiers:
+                        summary.append((label, tiers))
             summary.sort(key=lambda x: x[0])
             with contextlib.suppress(Exception):
                 await self.notifier.onboarding_finished(sub.tg_id, sub.query, summary)
@@ -110,12 +153,14 @@ class AvitoPoller:
             if orig_id:
                 crow = await self.repos.listings.get_cached_listing(orig_id)
                 res = _apply_cache(crow)
-                if res: return res
+                if res:
+                    return res
 
             crow = await self.repos.listings.get_cached_listing(item.id)
             if crow and crow["price"] == (item.price or None):
                 res = _apply_cache(crow)
-                if res: return res
+                if res:
+                    return res
 
             try:
                 verdict = await fast_value_listing(item, is_discovery=is_discovery)
@@ -189,7 +234,13 @@ class AvitoPoller:
                         runtime_drop["feedback_threshold"] = runtime_drop.get("feedback_threshold", 0) + 1
                         return
 
-                personal = await feedback_personal_penalty(tg_id, it, report, valuation)
+                personal = await feedback_personal_penalty(
+                    tg_id,
+                    it,
+                    report,
+                    valuation,
+                    target_query=target.query if is_sub else None,
+                )
                 if personal.get("drop"):
                     counters["filtered"] += 1
                     reason = personal.get("reason") or "feedback_personal"
@@ -211,6 +262,7 @@ class AvitoPoller:
                     counters["errors"] += 1
                     with contextlib.suppress(Exception):
                         await self.repos.alerts.queue_pending_alert(tg_id, it, report, valuation, sub_query=sub_query, error=str(e))
+                        counters["queued"] += 1
                     return
 
                 counters["deals"] += 1
@@ -239,9 +291,10 @@ class AvitoPoller:
         d_users = await self.repos.users.discovery_users()
         if not subs and not d_users:
             runtime.update_cycle(mode="fast", status="idle", subs=0, scraped=0, processed=0, cached=0, errors=0, deals=0, filtered=0, drop_reasons={})
+            _log_cycle("fast", "idle", subs=0, counters=_new_counters(), drop_reasons={})
             return
 
-        counters = {"scraped": 0, "processed": 0, "cached": 0, "errors": 0, "deals": 0, "filtered": 0}
+        counters = _new_counters()
         cycle_eval = {}
         runtime_drop = {}
         eval_sem = asyncio.Semaphore(config.FAST_WORKERS)
@@ -249,7 +302,8 @@ class AvitoPoller:
         if d_users:
             if self._onboard_tasks:
                 for t in list(self._onboard_tasks):
-                    with contextlib.suppress(Exception): t.cancel()
+                    with contextlib.suppress(Exception):
+                        t.cancel()
                 self._onboard_tasks.clear()
                 self._onboard_inprogress.clear()
         else:
@@ -286,6 +340,13 @@ class AvitoPoller:
             cached=counters["cached"], errors=counters["errors"], deals=counters["deals"],
             filtered=counters["filtered"], drop_reasons=runtime_drop,
         )
+        _log_cycle(
+            "fast",
+            "success",
+            subs=len(subs),
+            counters=counters,
+            drop_reasons=runtime_drop,
+        )
 
     async def poll_deep(self) -> None:
         if self.browser.session.is_paused:
@@ -299,15 +360,17 @@ class AvitoPoller:
         d_users = await self.repos.users.discovery_users()
         if not d_users:
             runtime.update_cycle(mode="deep", status="idle", subs=0, scraped=0, processed=0, cached=0, errors=0, deals=0, filtered=0, drop_reasons={})
+            _log_cycle("deep", "idle", subs=0, counters=_new_counters(), drop_reasons={})
             return
 
         start_page = config.FAST_SCAN_PAGES + 1
         deep_pages = max(0, config.DEEP_SCAN_PAGES - config.FAST_SCAN_PAGES)
         if deep_pages <= 0:
             runtime.update_cycle(mode="deep", status="disabled", subs=0, scraped=0, processed=0, cached=0, errors=0, deals=0, filtered=0, drop_reasons={})
+            _log_cycle("deep", "disabled", subs=0, counters=_new_counters(), drop_reasons={})
             return
 
-        counters = {"scraped": 0, "processed": 0, "cached": 0, "errors": 0, "deals": 0, "filtered": 0}
+        counters = _new_counters()
         cycle_eval = {}
         runtime_drop = {}
         eval_sem = asyncio.Semaphore(config.DEEP_WORKERS)
@@ -331,4 +394,11 @@ class AvitoPoller:
             subs=0, scraped=counters["scraped"], processed=counters["processed"],
             cached=counters["cached"], errors=counters["errors"], deals=counters["deals"],
             filtered=counters["filtered"], drop_reasons=runtime_drop,
+        )
+        _log_cycle(
+            "deep",
+            "success" if counters["errors"] == 0 else "error",
+            subs=0,
+            counters=counters,
+            drop_reasons=runtime_drop,
         )

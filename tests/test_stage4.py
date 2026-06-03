@@ -136,6 +136,20 @@ def test_card_text() -> None:
     check("card has badges", "ниже рынка" in bt
           and "магазин/перекуп" in bt and "риск" in bt)
 
+    rt = format_deal_card(
+        _item(
+            seller_type="private",
+            seller_label="Частное лицо",
+            seller_listings=None,
+            seller_reviews=11,
+        ),
+        _report(condition="defect"),
+        _val(shoplike=True, scam_score=80, pros=["частник"], cons=[]),
+        "",
+    )
+    check("retail marker is not reseller badge",
+          "розничные маркеры" in rt and "магазин/перекуп" not in rt)
+
 
 def test_haggle_and_kb() -> None:
     cheap = build_haggle_text(_item(price=20000), _val(baseline_price=80000))

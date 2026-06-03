@@ -317,7 +317,6 @@ async def test_engine() -> None:
           vp.opportunity is False and "for_parts" in vp.missing)
 
     # No baseline at all -> flagged, not guessed.
-    devn = await get_or_create_device("apple", f"iPhone NOBASE {tag}", 128)
     vn = await value_listing(_item(40000), _report(f"iPhone NOBASE {tag}", "good"))
     check("no baseline flagged",
           vn.baseline_price is None and "no_baseline" in vn.missing

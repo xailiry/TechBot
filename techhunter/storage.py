@@ -441,6 +441,38 @@ def feedback_features(item, report, valuation) -> dict:
     }
 
 
+def _model_base(model: str | None) -> str | None:
+    if not model:
+        return None
+    return model.split("[", 1)[0].strip().lower()
+
+
+def _wrong_model_signal(target_query: str | None, report) -> bool:
+    if not target_query:
+        return False
+
+    from .ai.normalize import normalize_device
+    from .ai.specs import extract_specs
+
+    specs = extract_specs(target_query)
+    expected = normalize_device(
+        target_query,
+        storage_gb=specs.storage_gb,
+        ram_gb=specs.ram_gb,
+    )
+    if not expected.model:
+        return False
+
+    actual_model = _model_base(getattr(report, "model", None))
+    if actual_model is None:
+        return True
+    if actual_model != _model_base(expected.model):
+        return True
+
+    actual_storage = getattr(report, "storage_gb", None)
+    return expected.storage_gb is not None and actual_storage != expected.storage_gb
+
+
 async def feedback_reason_stats(tg_id: int) -> dict[str, int]:
     async with get_session() as s:
         rows = (
@@ -457,7 +489,14 @@ async def feedback_reason_stats(tg_id: int) -> dict[str, int]:
     return {str(reason): int(count) for reason, count in rows if reason}
 
 
-async def feedback_personal_penalty(tg_id: int, item, report, valuation) -> dict:
+async def feedback_personal_penalty(
+    tg_id: int,
+    item,
+    report,
+    valuation,
+    *,
+    target_query: str | None = None,
+) -> dict:
     """Reason-aware personal calibration.
 
     The old feedback loop only changed the global profit threshold. This one
@@ -498,6 +537,12 @@ async def feedback_personal_penalty(tg_id: int, item, report, valuation) -> dict
         reason = "feedback_condition"
         score_penalty += 15
         extra_profit += 5000
+    elif stats.get("wrong_model", 0) >= 2 and _wrong_model_signal(
+        target_query, report
+    ):
+        reason = "feedback_wrong_model"
+        score_penalty += 20
+        extra_profit += 10000
     elif stats.get("too_expensive", 0) >= 3:
         reason = "feedback_too_expensive"
         extra_profit += min(20000, 5000 + stats["too_expensive"] * 1500)

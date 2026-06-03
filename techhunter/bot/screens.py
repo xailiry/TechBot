@@ -61,6 +61,7 @@ _REASON_RU = {
     "feedback_reseller": "перекуп по твоему фидбеку",
     "feedback_battery": "АКБ по твоему фидбеку",
     "feedback_condition": "состояние по твоему фидбеку",
+    "feedback_wrong_model": "модель/память по твоему фидбеку",
     "feedback_too_expensive": "дорого по твоему фидбеку",
     "feedback_scam": "мутно по твоему фидбеку",
 }

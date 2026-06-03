@@ -67,6 +67,12 @@ def test_specs() -> None:
     check("real replaced still caught",
           "screen_replaced" in extract_specs(
               "iPhone 13", "дисплей не родной, ставили аналог").defects)
+    check("replaced display verb-first caught",
+          "screen_replaced" in extract_specs(
+              "iPhone 13", "менялся дисплей, всё работает").defects)
+    check("changed screen verb-first caught",
+          "screen_replaced" in extract_specs(
+              "iPhone 13", "меняли экран, true tone есть").defects)
     check("real cracked still caught",
           "screen_cracked" in extract_specs(
               "iPhone 13", "разбит экран, трещина").defects)
@@ -121,6 +127,22 @@ def test_specs() -> None:
     )
     check("no false stripes", "screen_display_defect" not in s9.defects)
 
+    check("screen not working -> display defect",
+          "screen_display_defect" in extract_specs(
+              "iPhone 13", "не работает экран").defects)
+    check("touch not working -> display defect",
+          "screen_display_defect" in extract_specs(
+              "iPhone 13", "тач не работает").defects)
+    check("water damage -> no_power",
+          "no_power" in extract_specs(
+              "iPhone 13", "утопленник, после воды").defects)
+    check("face id error -> defect",
+          "faceid_broken" in extract_specs(
+              "iPhone 13", "face id ошибка").defects)
+    check("back glass cracked wording",
+          "back_glass_cracked" in extract_specs(
+              "iPhone 13", "заднее стекло треснуто, крышка в трещинах").defects)
+
 
 def test_normalize() -> None:
     d = normalize_device("Айфон 13 про макс 256гб", storage_gb=256)
@@ -140,10 +162,16 @@ def test_normalize() -> None:
     check("iphone 17 air", normalize_device("iPhone 17 Air 256 ГБ").model == "iPhone Air")
     sg = normalize_device("Samsung Galaxy S24 Ultra")
     check("samsung s24 ultra", sg.brand == "samsung" and sg.model == "Galaxy S24 Ultra")
+    check("samsung ru c23 ultra",
+          normalize_device("самсунг с23 ультра 512").model == "Galaxy S23 Ultra")
+    check("samsung ru a55",
+          normalize_device("самсунг а55").model == "Galaxy A55")
     zf = normalize_device("Galaxy Z Fold5 512")
     check("z fold5", zf.model == "Galaxy Z Fold5")
     px = normalize_device("Google Pixel 8 Pro")
     check("pixel 8 pro", px.brand == "google" and px.model == "Pixel 8 Pro")
+    check("pixel ru pro",
+          normalize_device("пиксель 8 про").model == "Pixel 8 Pro")
     check("redmi note pro",
           normalize_device("Redmi Note 13 Pro 256").model == "Redmi Note 13 Pro")
     check("poco x pro",
