@@ -46,6 +46,7 @@ class AvitoBrowser:
         self._last_restart = 0.0
         self._last_captcha_notify = 0.0
         self._captcha_solved_page: Page | None = None
+        self._transient_slots = asyncio.Semaphore(config.MAX_TRANSIENT_PAGES)
 
     @staticmethod
     def _is_closed_error(err: object) -> bool:
@@ -254,6 +255,12 @@ class AvitoBrowser:
             await self._reload(page)
         return ok
 
+    @staticmethod
+    def _captcha_is_cleared(html: str, *, is_detail: bool) -> bool:
+        if page_blocked(html, detail=is_detail):
+            return False
+        return has_detail(html) if is_detail else has_listings(html)
+
     @contextlib.asynccontextmanager
     async def acquire_page(self, mode: str = "fast"):
         await self.start()
@@ -263,14 +270,25 @@ class AvitoBrowser:
             
         pool = self._select_pool(mode)
         transient = False
+        transient_slot = False
         try:
             page = await asyncio.wait_for(
                 pool.get(),
                 timeout=max(0.0, config.PAGE_ACQUIRE_TIMEOUT_SEC),
             )
         except asyncio.TimeoutError:
-            page = await self._new_stealth_page()
-            transient = True
+            if config.MAX_TRANSIENT_PAGES <= 0:
+                page = await pool.get()
+            else:
+                await self._transient_slots.acquire()
+                transient_slot = True
+                try:
+                    page = pool.get_nowait()
+                    self._transient_slots.release()
+                    transient_slot = False
+                except asyncio.QueueEmpty:
+                    page = await self._new_stealth_page()
+                    transient = True
         try:
             if self._is_page_closed(page):
                 page = await self._new_stealth_page()
@@ -290,25 +308,34 @@ class AvitoBrowser:
                     log.error("acquire_page: failed to replace dead page: %s", e)
             else:
                 current_pool.put_nowait(page)
+            if transient_slot:
+                self._transient_slots.release()
 
     # ─── search ─────────────────────────────────────────────────────────────
 
     async def _handle_captcha(self, page: Page, url: str, is_detail: bool) -> bool:
+        with contextlib.suppress(Exception):
+            await page.bring_to_front()
+
         async def check_cleared() -> bool:
             try:
                 if self._is_page_closed(page):
                     return False
                 await page.reload(wait_until="domcontentloaded", timeout=config.NAV_TIMEOUT_MS)
                 html = await page.content()
-                return has_detail(html) if is_detail else has_listings(html)
+                return self._captcha_is_cleared(html, is_detail=is_detail)
             except Exception:
                 return False
 
         if await self.session.handle_captcha(url, check_cleared):
-            if not self._is_page_closed(page):
-                with contextlib.suppress(Exception):
+            try:
+                html = await page.content()
+                if page_blocked(html, detail=is_detail):
                     await page.reload(wait_until="domcontentloaded", timeout=config.NAV_TIMEOUT_MS)
-            return True
+                    html = await page.content()
+                return self._captcha_is_cleared(html, is_detail=is_detail)
+            except Exception:
+                return False
         return False
 
     async def search(

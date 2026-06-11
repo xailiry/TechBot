@@ -24,7 +24,6 @@ _STATE: dict = {
     },
     "captcha": False,
     "training_mode": False,
-    "training_pid": None,
     "training": {
         "active": False,
         "started_at": None,

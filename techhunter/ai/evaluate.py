@@ -135,7 +135,12 @@ async def evaluate_listing(
 
     images = item.images or ([item.image] if item.image else [])
     primary_bytes: bytes | None = None
-    if images:
+    # Download only when a consumer needs it (CLIP or dhash dedup); the
+    # text-only first pass must stay network-free beyond the page itself.
+    need_primary = bool(images) and (
+        do_dedup or (run_clip and config.CLIP_ENABLED)
+    )
+    if need_primary:
         primary_bytes = await download_image_bytes(images[0])
 
     if run_clip and config.CLIP_ENABLED and images:

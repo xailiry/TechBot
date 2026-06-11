@@ -244,9 +244,9 @@ def has_detail(html: str | None) -> bool:
 
 
 def is_block_page(html: str | None) -> bool:
-    """Tight block/antibot detection. Unlike looks_blocked it does NOT
-    trip on bare 'captcha'/'datadome' substrings (those live in legit
-    Avito bundles); it requires a real interstitial signal."""
+    """Tight block/antibot detection. Deliberately does NOT trip on bare
+    'captcha'/'datadome' substrings (those live in legit Avito bundles);
+    it requires a real interstitial signal."""
     if not html:
         return False
     s = html[:16000].lower()
@@ -274,17 +274,6 @@ def page_blocked(html: str | None, *, detail: bool = False) -> bool:
     if positive:
         return False
     return looks_loading(html)
-
-
-def looks_blocked(html: str | None) -> bool:
-    if not html:
-        return False
-    snippet = html[:8000].lower()
-    return any(
-        m in snippet
-        for m in ("доступ ограничен", "проблема с ip", "captcha", "datadome",
-                  "verified-user")
-    )
 
 
 def looks_loading(html: str | None) -> bool:

@@ -14,6 +14,7 @@ from ..valuation.engine import Valuation, fast_value_listing, learn_from_card
 from ..valuation.devices import device_summary, get_or_create_device, log_observation, relearn
 from ..valuation.scam import looks_shoplike
 from ..delivery import passes_filters
+from ..feedback import evaluate_personal_penalty, feedback_threshold_multiplier
 
 log = logging.getLogger(__name__)
 
@@ -72,27 +73,35 @@ class AvitoPoller:
         self.notifier = notifier
         self._onboard_inprogress: set[int] = set()
         self._onboard_tasks: set[asyncio.Task] = set()
+        self._onboard_lock = asyncio.Lock()
 
     async def _onboard(self, sub, announce: bool) -> None:
-        if self.browser.session.is_paused:
-            log.warning("Onboarding skipped because browser is paused.")
-            return
-        if announce:
-            with contextlib.suppress(Exception):
-                await self.notifier.onboarding_started(sub.tg_id, sub.query, config.ONBOARDING_MAX_SEC)
-        
+        async with self._onboard_lock:
+            if self.browser.session.is_paused:
+                log.warning("Onboarding skipped because browser is paused.")
+                return
+            if announce:
+                with contextlib.suppress(Exception):
+                    await self.notifier.onboarding_started(
+                        sub.tg_id, sub.query, config.ONBOARDING_MAX_SEC
+                    )
+
+            await self._run_onboarding(sub, announce)
+
+    async def _run_onboarding(self, sub, announce: bool) -> None:
         deadline = time.time() + config.ONBOARDING_MAX_SEC
         try:
             items = await self.browser.search(
                 sub.query, sub.city_slug, min_price=sub.min_price,
-                max_price=sub.max_price, pages=config.ONBOARDING_PAGES
+                max_price=sub.max_price, pages=config.ONBOARDING_PAGES,
+                mode="deep",
             )
         except Exception as e:
             log.warning("Onboarding search failed sub %s: %s", sub.id, e)
             return
 
         cand = [it for it in items if normalize_device(it.title).model is not None][:config.ONBOARDING_MAX_DETAILS]
-        sem = asyncio.Semaphore(config.MONITOR_CONCURRENCY)
+        sem = asyncio.Semaphore(config.ONBOARDING_WORKERS)
         device_ids: set[int] = set()
 
         async def _collect(it):
@@ -100,7 +109,7 @@ class AvitoPoller:
                 return
             async with sem:
                 try:
-                    it = await self.browser.fetch_details(it)
+                    it = await self.browser.fetch_details(it, mode="deep")
                     rep = await evaluate_listing(it, run_clip=False, do_dedup=False)
                 except Exception:
                     return
@@ -201,10 +210,9 @@ class AvitoPoller:
         tg_id = target.tg_id
         sub_query = target.query if is_sub else "🔎 Discovery"
         prefs = await self.repos.users.get_delivery_prefs(tg_id)
-        
-        # In a real setup, feedback methods would be in a service layer. For now, we call storage or repo.
-        from ..storage import feedback_threshold_multiplier, feedback_personal_penalty
+        # Per-target feedback state is fetched once per cycle, not per item.
         feedback_mult = await feedback_threshold_multiplier(tg_id)
+        reason_stats = await self.repos.feedback.feedback_reason_stats(tg_id)
 
         async def _handle_one(it):
             try:
@@ -234,8 +242,8 @@ class AvitoPoller:
                         runtime_drop["feedback_threshold"] = runtime_drop.get("feedback_threshold", 0) + 1
                         return
 
-                personal = await feedback_personal_penalty(
-                    tg_id,
+                personal = evaluate_personal_penalty(
+                    reason_stats,
                     it,
                     report,
                     valuation,
@@ -334,16 +342,19 @@ class AvitoPoller:
             except Exception as e:
                 log.warning("Fast discovery failed: %s", e)
 
+        # "subs" counts active scan targets (subscriptions + discovery
+        # users) so the watchdog dry alert also works in pure Discovery mode.
+        targets = len(subs) + len(d_users)
         runtime.update_cycle(
             mode="fast", status="success",
-            subs=len(subs), scraped=counters["scraped"], processed=counters["processed"],
+            subs=targets, scraped=counters["scraped"], processed=counters["processed"],
             cached=counters["cached"], errors=counters["errors"], deals=counters["deals"],
             filtered=counters["filtered"], drop_reasons=runtime_drop,
         )
         _log_cycle(
             "fast",
             "success",
-            subs=len(subs),
+            subs=targets,
             counters=counters,
             drop_reasons=runtime_drop,
         )
@@ -391,14 +402,14 @@ class AvitoPoller:
             
         runtime.update_cycle(
             mode="deep", status="success" if counters["errors"] == 0 else "error",
-            subs=0, scraped=counters["scraped"], processed=counters["processed"],
+            subs=len(d_users), scraped=counters["scraped"], processed=counters["processed"],
             cached=counters["cached"], errors=counters["errors"], deals=counters["deals"],
             filtered=counters["filtered"], drop_reasons=runtime_drop,
         )
         _log_cycle(
             "deep",
             "success" if counters["errors"] == 0 else "error",
-            subs=0,
+            subs=len(d_users),
             counters=counters,
             drop_reasons=runtime_drop,
         )

@@ -149,9 +149,11 @@ def _bool_ru(v: bool) -> str:
     return "да" if v else "нет"
 
 
-def hub_kb(discovery_on: bool = False) -> InlineKeyboardMarkup:
+def hub_kb(
+    discovery_on: bool = False, is_admin: bool = False
+) -> InlineKeyboardMarkup:
     d_text = "🔎 Радар Discovery" + (" ✅" if discovery_on else "")
-    return _kb([
+    rows = [
         [InlineKeyboardButton(text=d_text, callback_data="nav:discovery")],
         [
             InlineKeyboardButton(text="🎯 Сделки и фильтры", callback_data="nav:settings"),
@@ -162,11 +164,13 @@ def hub_kb(discovery_on: bool = False) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="📋 Подписки", callback_data="nav:subs:0"),
         ],
         [
-            InlineKeyboardButton(text="⚙️ Настройки", callback_data="nav:settings"),
+            InlineKeyboardButton(text="📈 Качество", callback_data="nav:quality"),
             InlineKeyboardButton(text="❓ Помощь", callback_data="nav:help"),
         ],
-        [InlineKeyboardButton(text="🛠 Dev", callback_data="nav:dev")],
-    ])
+    ]
+    if is_admin:
+        rows.append([InlineKeyboardButton(text="🛠 Dev", callback_data="nav:dev")])
+    return _kb(rows)
 
 
 async def screen_hub(tg_id: int | None = None) -> tuple[str, InlineKeyboardMarkup]:
@@ -174,6 +178,7 @@ async def screen_hub(tg_id: int | None = None) -> tuple[str, InlineKeyboardMarku
     from ..db.models import User
 
     discovery_on = False
+    is_admin = bool(tg_id and tg_id in config.ADMIN_USER_IDS)
     if tg_id:
         async with get_session() as s:
             u = await s.get(User, tg_id)
@@ -200,7 +205,7 @@ async def screen_hub(tg_id: int | None = None) -> tuple[str, InlineKeyboardMarku
     if discovery_on:
         lines.append("")
         lines.append("Пока Discovery включён, подписки отдыхают.")
-    return "\n".join(lines), hub_kb(discovery_on)
+    return "\n".join(lines), hub_kb(discovery_on, is_admin)
 
 
 async def screen_discovery(tg_id: int) -> tuple[str, InlineKeyboardMarkup]:

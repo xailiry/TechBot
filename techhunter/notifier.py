@@ -19,7 +19,6 @@ log = logging.getLogger(__name__)
 class Notifier(Protocol):
     async def captcha_detected(self, url: str) -> None: ...
     async def captcha_cleared(self) -> None: ...
-    async def new_listing(self, item: ParsedListing) -> None: ...
     async def deal(
         self,
         item: ParsedListing,
@@ -68,12 +67,6 @@ class ConsoleNotifier:
 
     async def captcha_cleared(self) -> None:
         log.info("Captcha cleared, resuming monitor.")
-
-    async def new_listing(self, item: ParsedListing) -> None:
-        log.info(
-            "NEW %s | %s RUB | %s | %s",
-            item.id, item.price, item.title[:70], item.full_url,
-        )
 
     async def deal(
         self, item, report, valuation, *, tg_id=None, sub_query=None

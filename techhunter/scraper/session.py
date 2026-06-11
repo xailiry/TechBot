@@ -8,12 +8,6 @@ from ..notifier import Notifier
 
 log = logging.getLogger(__name__)
 
-class CaptchaException(Exception):
-    def __init__(self, url: str, html: str | None = None):
-        super().__init__(f"Captcha detected at {url}")
-        self.url = url
-        self.html = html
-
 class SessionManager:
     """Manages global bot pause state, primarily for Captcha blocks."""
     def __init__(self, notifier: Notifier | None = None):
@@ -22,6 +16,7 @@ class SessionManager:
         self._captcha_lock = asyncio.Lock()
         self._unblocked = asyncio.Event()
         self._unblocked.set()
+        self._captcha_future: asyncio.Future[bool] | None = None
         self._last_notify = 0.0
 
     @property
@@ -47,17 +42,29 @@ class SessionManager:
 
     async def handle_captcha(self, url: str, check_cleared_coro) -> bool:
         """Called by the first tab that spots a captcha. Others wait."""
-        am_first = False
         async with self._captcha_lock:
-            if self._unblocked.is_set():
+            future = self._captcha_future
+            am_first = future is None or future.done()
+            if am_first:
+                future = asyncio.get_running_loop().create_future()
+                self._captcha_future = future
                 self._unblocked.clear()
-                am_first = True
-        
+
+        assert future is not None
+        if not am_first:
+            return await asyncio.shield(future)
+
+        result = False
         if am_first:
             try:
                 self._paused.set()
                 runtime.set_captcha(True)
-                notified = await self._notify(url, force=True)
+                incident_due = (
+                    self._last_notify == 0
+                    or time.time() - self._last_notify
+                    >= config.CAPTCHA_INCIDENT_COOLDOWN_SEC
+                )
+                notified = await self._notify(url, force=incident_due)
                 
                 deadline = time.time() + config.CAPTCHA_MAX_WAIT_SEC if config.CAPTCHA_MAX_WAIT_SEC > 0 else None
                 recheck_sec = max(1, config.CAPTCHA_RECHECK_SEC)
@@ -71,15 +78,15 @@ class SessionManager:
                         if notified and self.notifier:
                             with contextlib.suppress(Exception):
                                 await self.notifier.captcha_cleared()
-                        return True
+                        result = True
+                        return result
                         
                 log.warning("Captcha not solved within %ss.", config.CAPTCHA_MAX_WAIT_SEC)
-                return False
+                return result
             finally:
                 self._paused.clear()
                 runtime.set_captcha(False)
+                if not future.done():
+                    future.set_result(result)
                 self._unblocked.set()
-        else:
-            await self._unblocked.wait()
-            return True
 

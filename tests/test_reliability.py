@@ -7,6 +7,9 @@ import sys
 import uuid
 
 from techhunter.ai.evaluate import EvaluationReport
+from techhunter.db import get_session
+from techhunter.db.repository import RepositoryContainer
+from techhunter.monitoring.poller import AvitoPoller
 from techhunter.scraper.models import ParsedListing
 from techhunter.storage import (
     alert_already_sent,
@@ -46,6 +49,20 @@ def _val(lid):
                      net_profit=15000, profit_pct=0.25, opportunity=True,
                      opportunity_type="working", scam_score=70,
                      scam_verdict="unknown")
+
+
+def _poller(notifier, fake_evaluate) -> AvitoPoller:
+    """Real repos + injected evaluation, the way the monitor wires it."""
+    poller = AvitoPoller(
+        RepositoryContainer(get_session), browser=object(), notifier=notifier
+    )
+    poller._evaluate = fake_evaluate
+    return poller
+
+
+def _counters() -> dict:
+    return {"errors": 0, "processed": 0, "cached": 0,
+            "deals": 0, "filtered": 0, "queued": 0}
 
 
 async def test_cache_and_retry() -> None:
@@ -121,17 +138,10 @@ async def test_delivery_failure_not_marked_sent() -> None:
     async def fake_evaluate(*args, **kwargs):
         return rep, val
 
-    orig = monitor._evaluate
-    monitor._evaluate = fake_evaluate  # type: ignore
-    try:
-        counters = {"errors": 0, "processed": 0, "cached": 0,
-                    "deals": 0, "filtered": 0}
-        await monitor._handle_items(
-            object(), [item], Target(), FailingNotifier(),
-            asyncio.Semaphore(1), {}, counters, {}, mode="fast",
-        )
-    finally:
-        monitor._evaluate = orig  # type: ignore
+    counters = _counters()
+    await _poller(FailingNotifier(), fake_evaluate)._handle_items(
+        [item], Target(), asyncio.Semaphore(1), {}, counters, {}, mode="fast",
+    )
 
     check("delivery failure counted", counters["errors"] == 1)
     check("delivery failure not marked sent",
@@ -190,8 +200,6 @@ async def test_pending_alert_backoff_and_dead() -> None:
 
 
 async def test_feedback_threshold_filters_noisy_user() -> None:
-    from techhunter import monitor
-
     lid = f"rel-{uuid.uuid4().hex}"
     tg = 711000 + (uuid.uuid4().int % 1000)
     item = _item(lid)
@@ -218,19 +226,13 @@ async def test_feedback_threshold_filters_noisy_user() -> None:
     async def fake_evaluate(*args, **kwargs):
         return rep, val
 
-    orig = monitor._evaluate
-    monitor._evaluate = fake_evaluate  # type: ignore
     notifier = Notifier()
-    try:
-        counters = {"errors": 0, "processed": 0, "cached": 0,
-                    "deals": 0, "filtered": 0}
-        drops = {}
-        await monitor._handle_items(
-            object(), [item], Target(), notifier,
-            asyncio.Semaphore(1), {}, counters, drops, mode="fast",
-        )
-    finally:
-        monitor._evaluate = orig  # type: ignore
+    counters = _counters()
+    drops = {}
+    await _poller(notifier, fake_evaluate)._handle_items(
+        [item], Target(), asyncio.Semaphore(1), {}, counters, drops,
+        mode="fast",
+    )
 
     check("feedback threshold filtered", notifier.calls == 0
           and counters["filtered"] == 1)
@@ -238,8 +240,6 @@ async def test_feedback_threshold_filters_noisy_user() -> None:
 
 
 async def test_feedback_reason_filters_rebuilt_reseller() -> None:
-    from techhunter import monitor
-
     lid = f"rel-{uuid.uuid4().hex}"
     tg = 711500 + (uuid.uuid4().int % 1000)
     item = _item(lid)
@@ -276,19 +276,13 @@ async def test_feedback_reason_filters_rebuilt_reseller() -> None:
     async def fake_evaluate(*args, **kwargs):
         return rep, val
 
-    orig = monitor._evaluate
-    monitor._evaluate = fake_evaluate  # type: ignore
     notifier = Notifier()
-    try:
-        counters = {"errors": 0, "processed": 0, "cached": 0,
-                    "deals": 0, "filtered": 0}
-        drops = {}
-        await monitor._handle_items(
-            object(), [item], Target(), notifier,
-            asyncio.Semaphore(1), {}, counters, drops, mode="fast",
-        )
-    finally:
-        monitor._evaluate = orig  # type: ignore
+    counters = _counters()
+    drops = {}
+    await _poller(notifier, fake_evaluate)._handle_items(
+        [item], Target(), asyncio.Semaphore(1), {}, counters, drops,
+        mode="fast",
+    )
 
     check("rebuilt reseller filtered", notifier.calls == 0
           and counters["filtered"] == 1)
@@ -296,8 +290,6 @@ async def test_feedback_reason_filters_rebuilt_reseller() -> None:
 
 
 async def test_feedback_reason_filters_wrong_model() -> None:
-    from techhunter import monitor
-
     lid = f"rel-{uuid.uuid4().hex}"
     tg = 711700 + (uuid.uuid4().int % 1000)
     item = _item(lid)
@@ -342,19 +334,13 @@ async def test_feedback_reason_filters_wrong_model() -> None:
     async def fake_evaluate(*args, **kwargs):
         return rep, val
 
-    orig = monitor._evaluate
-    monitor._evaluate = fake_evaluate  # type: ignore
     notifier = Notifier()
-    try:
-        counters = {"errors": 0, "processed": 0, "cached": 0,
-                    "deals": 0, "filtered": 0}
-        drops = {}
-        await monitor._handle_items(
-            object(), [item], Target(), notifier,
-            asyncio.Semaphore(1), {}, counters, drops, mode="fast",
-        )
-    finally:
-        monitor._evaluate = orig  # type: ignore
+    counters = _counters()
+    drops = {}
+    await _poller(notifier, fake_evaluate)._handle_items(
+        [item], Target(), asyncio.Semaphore(1), {}, counters, drops,
+        mode="fast",
+    )
 
     check("wrong model feedback filtered", notifier.calls == 0
           and counters["filtered"] == 1)
@@ -362,8 +348,6 @@ async def test_feedback_reason_filters_wrong_model() -> None:
 
 
 async def test_subscription_battery_filter_applied() -> None:
-    from techhunter import monitor
-
     lid = f"rel-{uuid.uuid4().hex}"
     tg = 712000 + (uuid.uuid4().int % 1000)
     item = _item(lid)
@@ -385,19 +369,13 @@ async def test_subscription_battery_filter_applied() -> None:
     async def fake_evaluate(*args, **kwargs):
         return rep, val
 
-    orig = monitor._evaluate
-    monitor._evaluate = fake_evaluate  # type: ignore
     notifier = Notifier()
-    try:
-        counters = {"errors": 0, "processed": 0, "cached": 0,
-                    "deals": 0, "filtered": 0}
-        drops = {}
-        await monitor._handle_items(
-            object(), [item], Target(), notifier,
-            asyncio.Semaphore(1), {}, counters, drops, mode="fast",
-        )
-    finally:
-        monitor._evaluate = orig  # type: ignore
+    counters = _counters()
+    drops = {}
+    await _poller(notifier, fake_evaluate)._handle_items(
+        [item], Target(), asyncio.Semaphore(1), {}, counters, drops,
+        mode="fast",
+    )
 
     check("subscription battery filter blocks low akb", notifier.calls == 0)
     check("battery filter counted", counters["filtered"] == 1)

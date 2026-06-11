@@ -12,10 +12,16 @@ import sys
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
-from techhunter import config, monitor
+from techhunter import config
 from techhunter.ai.normalize import normalize_device
 from techhunter.ai.specs import extract_specs
+from techhunter.db import get_session
+from techhunter.db.repository import RepositoryContainer
+from techhunter.monitoring import poller as poller_module
+from techhunter.monitoring.poller import AvitoPoller
+from techhunter.notifier import ConsoleNotifier
 from techhunter.scraper.models import ParsedListing
+from techhunter.scraper.session import SessionManager
 from techhunter.valuation.devices import (
     get_model_working_meta,
     get_or_create_device,
@@ -39,6 +45,15 @@ def _item(item_id: str, title: str, price: int) -> ParsedListing:
     return ParsedListing(
         id=item_id, title=title, price=price,
         url=f"/items/{item_id}",
+    )
+
+
+def _make_poller(browser=None) -> AvitoPoller:
+    """A poller wired with real repos, the way MonitorManager builds it."""
+    if browser is None:
+        browser = SimpleNamespace(session=SimpleNamespace(is_paused=False))
+    return AvitoPoller(
+        RepositoryContainer(get_session), browser, ConsoleNotifier(beep=False)
     )
 
 
@@ -144,17 +159,17 @@ async def test_learn_uses_card_not_detail() -> None:
 
     title = "Honor 90 256GB"
     dev_id = await _resolve_device(title)
-    orig = monitor.process_new_listing
-    monitor.process_new_listing = _fake_process  # type: ignore
+    orig = poller_module.process_new_listing
+    poller_module.process_new_listing = _fake_process  # type: ignore
     try:
         item = _item("d7", title, 22000)
         counters = {"errors": 0, "processed": 0, "cached": 0}
-        await monitor._evaluate(
-            object(), item, asyncio.Semaphore(1), {}, counters,
+        await _make_poller()._evaluate(
+            item, asyncio.Semaphore(1), {}, counters,
             mode="fast", is_discovery=True, deep_budget={"n": 5},
         )
     finally:
-        monitor.process_new_listing = orig  # type: ignore
+        poller_module.process_new_listing = orig  # type: ignore
 
     check("detail NOT opened on learn", calls["n"] == 0)
     check("learning counted", counters.get("learning") == 1)
@@ -215,18 +230,18 @@ async def test_fresh_iphone_learning_opens_detail() -> None:
         calls["n"] += 1
         return None, None
 
-    orig = monitor.process_new_listing
-    monitor.process_new_listing = _fake_process  # type: ignore
+    orig = poller_module.process_new_listing
+    poller_module.process_new_listing = _fake_process  # type: ignore
     try:
         item = _item("d17", "iPhone 17 Pro 256GB", 85000)
         budget = {"n": 1}
         counters = {"errors": 0, "processed": 0, "cached": 0}
-        await monitor._evaluate(
-            object(), item, asyncio.Semaphore(1), {}, counters,
+        await _make_poller()._evaluate(
+            item, asyncio.Semaphore(1), {}, counters,
             mode="fast", is_discovery=True, deep_budget=budget,
         )
     finally:
-        monitor.process_new_listing = orig  # type: ignore
+        poller_module.process_new_listing = orig  # type: ignore
 
     check("fresh iPhone opens detail for learning", calls["n"] == 1)
     check("fresh iPhone budget decremented", budget["n"] == 0)
@@ -242,18 +257,18 @@ async def test_storage_missing_opens_detail_for_learning() -> None:
         calls["n"] += 1
         return None, None
 
-    orig = monitor.process_new_listing
-    monitor.process_new_listing = _fake_process  # type: ignore
+    orig = poller_module.process_new_listing
+    poller_module.process_new_listing = _fake_process  # type: ignore
     try:
         item = _item("d7b", "Samsung Galaxy S25 Ultra", 40000)
         budget = {"n": 1}
         counters = {"errors": 0, "processed": 0, "cached": 0}
-        await monitor._evaluate(
-            object(), item, asyncio.Semaphore(1), {}, counters,
+        await _make_poller()._evaluate(
+            item, asyncio.Semaphore(1), {}, counters,
             mode="fast", is_discovery=True, deep_budget=budget,
         )
     finally:
-        monitor.process_new_listing = orig  # type: ignore
+        poller_module.process_new_listing = orig  # type: ignore
 
     check("storage-missing detail opened", calls["n"] == 1)
     check("storage-missing budget decremented", budget["n"] == 0)
@@ -276,17 +291,17 @@ async def test_deal_budget_defers() -> None:
     dev_id = await _resolve_device(title)
     await set_manual_baseline(dev_id, 40000)
 
-    orig = monitor.process_new_listing
-    monitor.process_new_listing = _fake_process  # type: ignore
+    orig = poller_module.process_new_listing
+    poller_module.process_new_listing = _fake_process  # type: ignore
     try:
         item = _item("d8", title, 10000)  # well under the gate -> "deal"
         counters = {"errors": 0, "processed": 0, "cached": 0}
-        rep, val = await monitor._evaluate(
-            object(), item, asyncio.Semaphore(1), {}, counters,
+        rep, val = await _make_poller()._evaluate(
+            item, asyncio.Semaphore(1), {}, counters,
             mode="fast", is_discovery=True, deep_budget={"n": 0},
         )
     finally:
-        monitor.process_new_listing = orig  # type: ignore
+        poller_module.process_new_listing = orig  # type: ignore
 
     check("deferred returns nothing", rep is None and val is None)
     check("deferred did NOT open detail", calls["n"] == 0)
@@ -306,18 +321,18 @@ async def test_deal_budget_consumed() -> None:
     dev_id = await _resolve_device(title)
     await set_manual_baseline(dev_id, 60000)
 
-    orig = monitor.process_new_listing
-    monitor.process_new_listing = _fake_process  # type: ignore
+    orig = poller_module.process_new_listing
+    poller_module.process_new_listing = _fake_process  # type: ignore
     try:
         item = _item("d9", title, 15000)
         counters = {"errors": 0, "processed": 0, "cached": 0}
         budget = {"n": 1}
-        await monitor._evaluate(
-            object(), item, asyncio.Semaphore(1), {}, counters,
+        await _make_poller()._evaluate(
+            item, asyncio.Semaphore(1), {}, counters,
             mode="fast", is_discovery=True, deep_budget=budget,
         )
     finally:
-        monitor.process_new_listing = orig  # type: ignore
+        poller_module.process_new_listing = orig  # type: ignore
 
     check("deal opened detail", calls["n"] == 1)
     check("budget decremented", budget["n"] == 0)
@@ -417,7 +432,7 @@ async def test_fast_poll_uses_hot_scan_window() -> None:
 
     class FakeBrowser:
         def __init__(self) -> None:
-            self.paused = asyncio.Event()
+            self.session = SimpleNamespace(is_paused=False)
 
         async def search(self, *args, **kwargs):
             calls.append({"args": args, "kwargs": kwargs})
@@ -465,43 +480,32 @@ async def test_fast_poll_uses_hot_scan_window() -> None:
     async def one_discovery_user():
         return [discovery_user]
 
-    orig_active = monitor.active_subscriptions
-    orig_discovery = monitor.discovery_users
     orig_fast_pages = config.FAST_SCAN_PAGES
-    orig_inprogress = set(monitor._onboard_inprogress)  # noqa: SLF001
-    orig_tasks = set(monitor._onboard_tasks)  # noqa: SLF001
     try:
         config.FAST_SCAN_PAGES = 3
-        browser = FakeBrowser()
+        poller = _make_poller(FakeBrowser())
 
-        monitor.active_subscriptions = one_default_sub  # type: ignore[assignment]
-        monitor.discovery_users = no_discovery  # type: ignore[assignment]
-        await monitor.poll_fast(browser, object())
+        poller.repos.subscriptions.active_subscriptions = one_default_sub
+        poller.repos.users.discovery_users = no_discovery
+        await poller.poll_fast()
         check("subscription default scans hot pages",
               calls[-1]["kwargs"]["pages"] == 3)
 
         calls.clear()
-        monitor.active_subscriptions = one_custom_sub  # type: ignore[assignment]
-        await monitor.poll_fast(browser, object())
+        poller.repos.subscriptions.active_subscriptions = one_custom_sub
+        await poller.poll_fast()
         check("subscription custom page count preserved",
               calls[-1]["kwargs"]["pages"] == 2)
 
         calls.clear()
-        monitor.active_subscriptions = no_subs  # type: ignore[assignment]
-        monitor.discovery_users = one_discovery_user  # type: ignore[assignment]
-        await monitor.poll_fast(browser, object())
+        poller.repos.subscriptions.active_subscriptions = no_subs
+        poller.repos.users.discovery_users = one_discovery_user
+        await poller.poll_fast()
         check("discovery scans hot pages", calls[-1]["kwargs"]["pages"] == 3)
     finally:
-        monitor.active_subscriptions = orig_active  # type: ignore[assignment]
-        monitor.discovery_users = orig_discovery  # type: ignore[assignment]
         config.FAST_SCAN_PAGES = orig_fast_pages
-        new_tasks = monitor._onboard_tasks - orig_tasks  # noqa: SLF001
-        for task in list(new_tasks):
+        for task in list(poller._onboard_tasks):
             task.cancel()
-        monitor._onboard_tasks.clear()  # noqa: SLF001
-        monitor._onboard_tasks.update(orig_tasks)  # noqa: SLF001
-        monitor._onboard_inprogress.clear()  # noqa: SLF001
-        monitor._onboard_inprogress.update(orig_inprogress)  # noqa: SLF001
 
 
 async def test_deep_poll_starts_after_fast_window() -> None:
@@ -509,7 +513,7 @@ async def test_deep_poll_starts_after_fast_window() -> None:
 
     class FakeBrowser:
         def __init__(self) -> None:
-            self.paused = asyncio.Event()
+            self.session = SimpleNamespace(is_paused=False)
 
         async def search(self, *args, **kwargs):
             calls.append({"args": args, "kwargs": kwargs})
@@ -524,16 +528,15 @@ async def test_deep_poll_starts_after_fast_window() -> None:
     async def one_discovery_user():
         return [discovery_user]
 
-    orig_discovery = monitor.discovery_users
     orig_fast_pages = config.FAST_SCAN_PAGES
     orig_deep_pages = config.DEEP_SCAN_PAGES
     try:
         config.FAST_SCAN_PAGES = 3
         config.DEEP_SCAN_PAGES = 12
-        monitor.discovery_users = one_discovery_user  # type: ignore[assignment]
-        await monitor.poll_deep(FakeBrowser(), object())
+        poller = _make_poller(FakeBrowser())
+        poller.repos.users.discovery_users = one_discovery_user
+        await poller.poll_deep()
     finally:
-        monitor.discovery_users = orig_discovery  # type: ignore[assignment]
         config.FAST_SCAN_PAGES = orig_fast_pages
         config.DEEP_SCAN_PAGES = orig_deep_pages
 
@@ -547,7 +550,7 @@ async def test_training_mode_skips_fast_and_deep() -> None:
 
     class FakeBrowser:
         def __init__(self) -> None:
-            self.paused = asyncio.Event()
+            self.session = SimpleNamespace(is_paused=False)
 
         async def search(self, *args, **kwargs):
             calls.append({"args": args, "kwargs": kwargs})
@@ -576,18 +579,17 @@ async def test_training_mode_skips_fast_and_deep() -> None:
     async def one_discovery_user():
         return [discovery_user]
 
-    orig_active = monitor.active_subscriptions
-    orig_discovery = monitor.discovery_users
+    from techhunter import runtime
+
+    poller = _make_poller(FakeBrowser())
+    poller.repos.subscriptions.active_subscriptions = one_sub
+    poller.repos.users.discovery_users = one_discovery_user
     try:
-        monitor.active_subscriptions = one_sub  # type: ignore[assignment]
-        monitor.discovery_users = one_discovery_user  # type: ignore[assignment]
-        monitor.runtime.set_training_mode(True)
-        await monitor.poll_fast(FakeBrowser(), object())
-        await monitor.poll_deep(FakeBrowser(), object())
+        runtime.set_training_mode(True)
+        await poller.poll_fast()
+        await poller.poll_deep()
     finally:
-        monitor.runtime.set_training_mode(False)
-        monitor.active_subscriptions = orig_active  # type: ignore[assignment]
-        monitor.discovery_users = orig_discovery  # type: ignore[assignment]
+        runtime.set_training_mode(False)
 
     check("training skips fast/deep searches", calls == [])
 

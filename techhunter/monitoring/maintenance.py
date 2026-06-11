@@ -67,9 +67,10 @@ class MaintenanceTasks:
         if sent:
             log.info("Pending deal delivery retried successfully: %d", sent)
         with contextlib.suppress(Exception):
-            # Assuming pending_alert_stats exists in repository or we don't strictly need it right now.
+            stats = await self.repos.alerts.pending_alert_stats()
             runtime.update_outbox(
-                pending=len(rows) - sent, dead=0, last_retry_at=time.time(),
+                pending=stats["pending"], dead=stats["dead"],
+                last_retry_at=time.time(),
                 last_sent=sent, last_error=last_error,
             )
         return sent

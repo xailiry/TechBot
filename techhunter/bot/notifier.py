@@ -52,10 +52,6 @@ class TelegramNotifier:
         log.info("Captcha cleared, monitor resumed.")
         await self._broadcast("✅ Капча решена, монитор продолжает работу.")
 
-    async def new_listing(self, item) -> None:
-        # Deliberately silent: only opportunities are pushed to users.
-        return
-
     async def deal(
         self, item, report, valuation, *, tg_id=None, sub_query=None
     ) -> None:

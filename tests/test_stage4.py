@@ -328,14 +328,20 @@ def test_onboarding_text() -> None:
 
 
 async def test_hub_screen() -> None:
-    from techhunter.bot.screens import screen_help, screen_hub
+    from techhunter.bot.screens import hub_kb, screen_help, screen_hub
 
     text, kb = await screen_hub()
     check("hub text", "TechHunter" in text)
     cbs = [b.callback_data for row in kb.inline_keyboard for b in row]
     for need in ("nav:discovery", "nav:subs:0", "nav:learned:0",
-                 "nav:settings", "nav:status", "nav:help", "nav:dev"):
+                 "nav:settings", "nav:status", "nav:help", "nav:quality"):
         check(f"hub has {need}", need in cbs)
+    check("hub hides dev for non-admin", "nav:dev" not in cbs)
+    admin_cbs = [
+        b.callback_data
+        for row in hub_kb(is_admin=True).inline_keyboard for b in row
+    ]
+    check("hub shows dev for admin", "nav:dev" in admin_cbs)
     _, hkb = screen_help()
     check("help has back",
           any(b.callback_data == "nav:hub"

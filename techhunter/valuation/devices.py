@@ -7,6 +7,7 @@ accumulate and the more accurate the medians become. Per condition tier
 """
 import logging
 import asyncio
+import time
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import delete, func, or_, select
@@ -20,6 +21,30 @@ from .clustering import robust_median
 
 log = logging.getLogger(__name__)
 _relearn_locks: dict[int, asyncio.Lock] = {}
+
+# TTL cache for triage lookups (get_working_meta and the two aggregate
+# fallbacks). The fast cycle re-resolves the same devices every poll; the
+# cache is cleared on every relearn / manual seed, so it can only delay a
+# brand-new baseline by BASELINE_TRIAGE_CACHE_SEC.
+_triage_cache: dict[tuple, tuple[float, tuple]] = {}
+
+
+def _cache_get(key: tuple) -> tuple | None:
+    if config.BASELINE_TRIAGE_CACHE_SEC <= 0:
+        return None
+    hit = _triage_cache.get(key)
+    if hit and time.monotonic() - hit[0] <= config.BASELINE_TRIAGE_CACHE_SEC:
+        return hit[1]
+    return None
+
+
+def _cache_put(key: tuple, value: tuple) -> None:
+    if config.BASELINE_TRIAGE_CACHE_SEC > 0:
+        _triage_cache[key] = (time.monotonic(), value)
+
+
+def invalidate_triage_cache() -> None:
+    _triage_cache.clear()
 
 
 def _relearn_lock(device_id: int) -> asyncio.Lock:
@@ -220,12 +245,15 @@ async def relearn(device_id: int, session: AsyncSession | None = None) -> int | 
     data AND sit in a sane band around working; otherwise the stale/illogical
     tier is deleted. We never guess."""
     async with _relearn_lock(device_id):
-        if session is not None:
-            return await _relearn_with_session(device_id, session)
-        async with get_session() as s:
-            res = await _relearn_with_session(device_id, s)
-            await s.commit()
-            return res
+        try:
+            if session is not None:
+                return await _relearn_with_session(device_id, session)
+            async with get_session() as s:
+                res = await _relearn_with_session(device_id, s)
+                await s.commit()
+                return res
+        finally:
+            invalidate_triage_cache()
 
 
 async def _relearn_with_session(device_id: int, session: AsyncSession) -> int | None:
@@ -289,11 +317,18 @@ async def get_baseline(device_id: int) -> int | None:
 async def get_working_meta(device_id: int) -> tuple[int | None, int, float]:
     """(price, sample_size, age_seconds) for the working baseline, after
     ensuring it is fresh. Powers the confidence label on the card."""
+    key = ("dev", device_id)
+    cached = _cache_get(key)
+    if cached is not None:
+        return cached
     price = await get_baseline(device_id)
     row = await _row(device_id, WORKING_CONDITION)
     if row is None:
-        return price, 0, 0.0
-    return price, int(row.sample_size or 0), _age_seconds(row.updated_at)
+        out = (price, 0, 0.0)
+    else:
+        out = (price, int(row.sample_size or 0), _age_seconds(row.updated_at))
+    _cache_put(key, out)
+    return out
 
 
 async def get_model_working_meta(
@@ -306,6 +341,10 @@ async def get_model_working_meta(
     Returns (median_of_variant_medians, total_sample, variant_count).
     """
     base = model.split(" [", 1)[0]
+    key = ("model", brand, base)
+    cached = _cache_get(key)
+    if cached is not None:
+        return cached
     async with get_session() as s:
         rows = (
             await s.execute(
@@ -327,10 +366,13 @@ async def get_model_working_meta(
             )
         ).all()
     if not rows:
-        return None, 0, 0
-    prices = [int(price) for price, _sample in rows]
-    sample = sum(int(sample or 0) for _price, sample in rows)
-    return robust_median(prices, drop_low_cluster=False), sample, len(rows)
+        out = (None, 0, 0)
+    else:
+        prices = [int(price) for price, _sample in rows]
+        sample = sum(int(sample or 0) for _price, sample in rows)
+        out = (robust_median(prices, drop_low_cluster=False), sample, len(rows))
+    _cache_put(key, out)
+    return out
 
 
 async def get_storage_working_meta(
@@ -346,6 +388,10 @@ async def get_storage_working_meta(
     source of truth.
     """
     base = model.split(" [", 1)[0]
+    key = ("storage", brand, base, storage_gb, ram_gb)
+    cached = _cache_get(key)
+    if cached is not None:
+        return cached
     async with get_session() as s:
         stmt = (
             select(MarketBaseline.median_price, MarketBaseline.sample_size)
@@ -365,10 +411,13 @@ async def get_storage_working_meta(
             stmt = stmt.where(DeviceCatalog.ram_gb == ram_gb)
         rows = (await s.execute(stmt)).all()
     if not rows:
-        return None, 0, 0
-    prices = [int(price) for price, _sample in rows]
-    sample = sum(int(sample or 0) for _price, sample in rows)
-    return robust_median(prices, drop_low_cluster=False), sample, len(rows)
+        out = (None, 0, 0)
+    else:
+        prices = [int(price) for price, _sample in rows]
+        sample = sum(int(sample or 0) for _price, sample in rows)
+        out = (robust_median(prices, drop_low_cluster=False), sample, len(rows))
+    _cache_put(key, out)
+    return out
 
 
 async def get_condition_baselines(device_id: int) -> dict[str, int]:
@@ -572,3 +621,4 @@ async def set_manual_baseline(device_id: int, median_price: int) -> None:
         device_id, WORKING_CONDITION, median_price,
         config.BASELINE_MIN_SAMPLE,
     )
+    invalidate_triage_cache()

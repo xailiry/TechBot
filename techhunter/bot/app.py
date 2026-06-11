@@ -235,6 +235,17 @@ async def _save_subscription(tg_id: int, body: str) -> str | None:
     parsed = parse_command(body)
     if not parsed:
         return None
+    # An unknown Cyrillic city would silently break the Avito URL (the slug
+    # map only covers major cities); fall back to whole-country search and
+    # tell the user instead of returning an empty subscription forever.
+    city_warning = ""
+    if not parsed["city_slug"].isascii():
+        city_warning = (
+            f"\n⚠️ Город «{esc(parsed['city_slug'])}» не распознан, "
+            "ищу по всей России. Можно указать slug с Avito, "
+            "например <code>rostov-na-donu</code>."
+        )
+        parsed["city_slug"] = "rossiya"
     sub_id = await add_subscription(
         tg_id,
         parsed["query"],
@@ -252,7 +263,7 @@ async def _save_subscription(tg_id: int, body: str) -> str | None:
         f"Цена: {fmt_price(parsed['min_price']) if parsed['min_price'] else '—'}"
         f" – {fmt_price(parsed['max_price']) if parsed['max_price'] else '—'}\n"
         f"Мин. АКБ: {parsed['min_battery'] or '—'}%\n"
-        f"Локация: {city}\n\n"
+        f"Локация: {city}{city_warning}\n\n"
         "Запускаю анализ рынка по этой модели."
     )
 
@@ -411,9 +422,12 @@ async def cb_noop(cb: CallbackQuery) -> None:
 
 @dp.callback_query(F.data.startswith("nav:"))
 async def cb_nav(cb: CallbackQuery, state: FSMContext) -> None:
-    await _answer_cb(cb)
     parts = cb.data.split(":")
     dest = parts[1]
+    if dest == "dev" and cb.from_user.id not in config.ADMIN_USER_IDS:
+        await _answer_cb(cb, "Только для владельца", show_alert=True)
+        return
+    await _answer_cb(cb)
     if dest == "hub":
         await state.clear()
         await _edit(cb, await screen_hub(cb.from_user.id))
@@ -610,7 +624,6 @@ async def cb_add_start(cb: CallbackQuery, state: FSMContext) -> None:
             InlineKeyboardButton(text="✖️ Отмена", callback_data="nav:hub")
         ]]),
     )
-    await _answer_cb(cb)
 
 
 @dp.message(StateFilter(AddSub.waiting), F.text & ~F.text.startswith("/"))

@@ -8,7 +8,7 @@ import asyncio
 import sys
 
 from techhunter.scraper.parser import (
-    looks_blocked,
+    is_block_page,
     looks_loading,
     parse_detail,
     parse_listings,
@@ -105,24 +105,42 @@ def test_detail_parse() -> None:
 
 
 def test_block_detect() -> None:
-    check("blocked detect", looks_blocked("<html>Доступ ограничен: проблема с IP"))
-    check("captcha detect", looks_blocked("please solve the CAPTCHA"))
-    check("not blocked", not looks_blocked("<div data-marker='item'>"))
+    check("blocked detect", is_block_page("<html>Доступ ограничен: проблема с IP"))
+    check("captcha detect", is_block_page('<div data-marker="captcha">'))
+    check("not blocked", not is_block_page("<div data-marker='item'>"))
     check("loading detect", looks_loading("Подождите, идёт загрузка"))
 
 
 async def test_dedup() -> None:
     import uuid
 
+    from sqlalchemy import select
+
+    from techhunter.db import get_session
+    from techhunter.db.models import Listing
     from techhunter.scraper.models import ParsedListing
-    from techhunter.storage import register_listing
+    from techhunter.storage import cache_listing_skipped, get_cached_listing
 
     pl = ParsedListing(id=f"stage1-{uuid.uuid4().hex}", title="t", price=1000,
                         url="/x/999")
-    first = await register_listing(pl)
-    second = await register_listing(pl)
-    check("first seen -> new", first is True)
-    check("second seen -> dup", second is False)
+    check("first seen -> new", await get_cached_listing(pl.id) is None)
+    await cache_listing_skipped(pl)
+    check("second seen -> dup", await get_cached_listing(pl.id) is not None)
+
+    # Retention prunes by last_seen, so every re-upsert must refresh it
+    # (the ORM onupdate does not fire for Core upserts).
+    async def _last_seen():
+        async with get_session() as s:
+            return (
+                await s.execute(
+                    select(Listing.last_seen).where(Listing.id == pl.id)
+                )
+            ).scalar()
+
+    first_seen = await _last_seen()
+    await asyncio.sleep(0.01)
+    await cache_listing_skipped(pl)
+    check("last_seen refreshed on re-upsert", await _last_seen() > first_seen)
 
 
 def main() -> None:

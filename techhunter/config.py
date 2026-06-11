@@ -41,8 +41,10 @@ BROWSER_FORCE_CLEAR_PROFILE_LOCKS = os.getenv(
 BROWSER_CHANNEL = os.getenv("BROWSER_CHANNEL", "chrome")
 PAGE_POOL_SIZE = int(os.getenv("PAGE_POOL_SIZE", "5"))
 # If the page pool is exhausted, wait this long, then use a transient
-# throwaway tab instead of blocking forever (no deadlock).
+# throwaway tab instead of blocking forever (no deadlock). The extra-tab cap
+# prevents concurrent subscription onboarding from opening a tab storm.
 PAGE_ACQUIRE_TIMEOUT_SEC = float(os.getenv("PAGE_ACQUIRE_TIMEOUT_SEC", "2.0"))
+MAX_TRANSIENT_PAGES = max(0, int(os.getenv("MAX_TRANSIENT_PAGES", "1")))
 # Min seconds between automatic browser restarts (crash recovery).
 BROWSER_RESTART_COOLDOWN_SEC = int(
     os.getenv("BROWSER_RESTART_COOLDOWN_SEC", "30")
@@ -63,7 +65,6 @@ AVITO_SORT_BY_DATE = int(os.getenv("AVITO_SORT_BY_DATE", "104"))
 
 # ─── Polling loop ───────────────────────────────────────────────────────────
 POLL_INTERVAL_SEC = int(os.getenv("POLL_INTERVAL_SEC", "20"))
-SUBSCRIPTION_STAGGER_SEC = float(os.getenv("SUBSCRIPTION_STAGGER_SEC", "0.3"))
 
 # Multi-worker split: reserve some tabs for fast page-1 scans, 
 # and use others for slower deep scans (pages 2+).
@@ -85,9 +86,6 @@ PAGE_TURN_DELAY_SEC = (
     float(os.getenv("PAGE_TURN_DELAY_MIN", "0.8")),
     float(os.getenv("PAGE_TURN_DELAY_MAX", "1.8")),
 )
-# How many new listings to enrich+value concurrently (bounded by the page
-# pool). Higher = faster cycles, slightly higher anti-bot pressure.
-MONITOR_CONCURRENCY = int(os.getenv("MONITOR_CONCURRENCY", "4"))
 # Reuse a listing's cached evaluation if processed within this window and
 # its price is unchanged (skip the heavy pipeline). Failures are NOT
 # cached, so they retry next cycle and a lot is never lost.
@@ -104,8 +102,11 @@ CAPTCHA_MAX_WAIT_SEC = int(os.getenv("CAPTCHA_MAX_WAIT_SEC", "3600"))
 CAPTCHA_NOTIFY_INTERVAL_SEC = int(
     os.getenv("CAPTCHA_NOTIFY_INTERVAL_SEC", "1800")
 )
-# Stable URL used to probe whether the IP block is gone (has_listings).
-AVITO_PROBE_PATH = os.getenv("AVITO_PROBE_PATH", "/rossiya/telefony?s=104")
+# A genuinely new challenge may be announced sooner than a long-running
+# reminder, but rapid block/clear oscillation must not spam Telegram.
+CAPTCHA_INCIDENT_COOLDOWN_SEC = int(
+    os.getenv("CAPTCHA_INCIDENT_COOLDOWN_SEC", "300")
+)
 # Audible beep on captcha so the operator notices (Windows only).
 CAPTCHA_BEEP = os.getenv("CAPTCHA_BEEP", "True").lower() in ("true", "1", "yes")
 
@@ -140,7 +141,6 @@ DHASH_MAX_DISTANCE = int(os.getenv("DHASH_MAX_DISTANCE", "2"))
 # Exact-hash match uses the index (cheap, common scam case). The fuzzy
 # near-dup pass is bounded to this many most-recent rows.
 DHASH_FUZZY_LIMIT = int(os.getenv("DHASH_FUZZY_LIMIT", "1500"))
-DHASH_SCAN_LIMIT = DHASH_FUZZY_LIMIT  # back-compat alias
 
 # ─── DB retention (keep SQLite small for long unattended runs) ───────────────
 CLEANUP_INTERVAL_SEC = int(os.getenv("CLEANUP_INTERVAL_SEC", str(6 * 3600)))
@@ -219,22 +219,29 @@ PRICE_OBS_RETENTION_DAYS = int(
 )
 # Re-learn a stored baseline if older than this (continuous learning).
 BASELINE_REFRESH_SEC = int(os.getenv("BASELINE_REFRESH_SEC", str(30 * 60)))
+# In-memory TTL cache for triage baseline lookups. Fast cycles re-check the
+# same models every poll; this avoids hammering SQLite with LIKE-join
+# queries. Invalidated on every relearn, so it only delays a NEW baseline
+# by at most this many seconds. 0 disables.
+BASELINE_TRIAGE_CACHE_SEC = int(os.getenv("BASELINE_TRIAGE_CACHE_SEC", "120"))
 # Absolute sanity for learning: drop placeholder/typo prices (1 RUB, 1 mln).
 # A genuine cheap broken flagship is still detected per-listing as an
 # opportunity (it lands in the broken/parts tier, not the working pool).
 PRICE_ABS_FLOOR = int(os.getenv("PRICE_ABS_FLOOR", "500"))
 PRICE_ABS_CEIL = int(os.getenv("PRICE_ABS_CEIL", "3000000"))
-JUNK_PRICE_MIN = PRICE_ABS_FLOOR  # back-compat alias
 
 # ─── Onboarding deep crawl (new subscription) ───────────────────────────────
 # On first sight of a subscription the bot crawls many pages to quickly
 # build per-condition price stats, then keeps learning incrementally.
-ONBOARDING_PAGES = int(os.getenv("ONBOARDING_PAGES", "15"))
-ONBOARDING_MAX_DETAILS = int(os.getenv("ONBOARDING_MAX_DETAILS", "120"))
+ONBOARDING_PAGES = int(os.getenv("ONBOARDING_PAGES", "5"))
+ONBOARDING_MAX_DETAILS = int(os.getenv("ONBOARDING_MAX_DETAILS", "40"))
 ONBOARDING_MAX_SEC = int(os.getenv("ONBOARDING_MAX_SEC", "480"))
+# Onboarding is deliberately gentle: regular subscription scans keep their
+# fast tabs while one background baseline crawl uses the deep pool.
+ONBOARDING_WORKERS = max(1, int(os.getenv("ONBOARDING_WORKERS", "1")))
 # Periodically redo the deep crawl (silently) so medians stay fresh from a
 # broad sample even when page 1 has no churn. 0 disables. Default 6h.
-ONBOARDING_REFRESH_SEC = int(os.getenv("ONBOARDING_REFRESH_SEC", str(90 * 60)))
+ONBOARDING_REFRESH_SEC = int(os.getenv("ONBOARDING_REFRESH_SEC", str(6 * 3600)))
 
 
 def require_bot_token() -> str:

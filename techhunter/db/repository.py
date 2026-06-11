@@ -1,8 +1,8 @@
-"""Repository layer for database operations.
+"""Repository layer: the single implementation of all database operations.
 
-Replaces the legacy storage.py module to enforce the Dependency Inversion
-Principle (DIP). Business logic receives repository instances rather than
-importing specific functions or db models directly.
+Business logic receives repository instances (RepositoryContainer); the
+storage.py facade re-exports the same methods as plain functions for the
+Telegram handlers and tests.
 """
 
 import asyncio
@@ -19,8 +19,10 @@ from ..ai.images import hamming
 from .models import (
     CardState,
     DealFeedback,
+    DeviceCatalog,
     ImageHash,
     Listing,
+    MarketBaseline,
     PendingAlert,
     PriceObservation,
     SentAlert,
@@ -44,6 +46,17 @@ class UserRepository:
                 )
             )
             await s.execute(stmt)
+
+    async def set_approved(self, tg_id: int, approved: bool) -> None:
+        async with self._sf() as s:
+            u = await s.get(User, tg_id)
+            if u:
+                u.is_approved = approved
+
+    async def is_user_approved(self, tg_id: int) -> bool:
+        async with self._sf() as s:
+            u = await s.get(User, tg_id)
+            return bool(u and u.is_approved)
 
     async def discovery_users(self) -> list[User]:
         async with self._sf() as s:
@@ -188,20 +201,6 @@ class ListingRepository:
     def __init__(self, session_factory: Callable[[], AsyncContextManager[AsyncSession]]):
         self._sf = session_factory
 
-    async def register_listing(self, item: ParsedListing) -> bool:
-        async with self._sf() as s:
-            existing = await s.get(Listing, item.id)
-            if existing is not None:
-                existing.last_price = item.price or existing.last_price
-                return False
-            s.add(
-                Listing(
-                    id=item.id, source="avito", url=item.full_url,
-                    title=item.title, last_price=item.price or None,
-                )
-            )
-            return True
-
     async def get_cached_listing(self, listing_id: str) -> dict | None:
         async with self._sf() as s:
             row = await s.get(Listing, listing_id)
@@ -225,13 +224,16 @@ class ListingRepository:
             return row[0] if row else None
 
     async def cache_listing(self, item: ParsedListing, report, valuation) -> None:
+        # last_seen is set explicitly: the ORM-level onupdate does not fire
+        # for Core upserts, and retention prunes by last_seen.
+        now = datetime.now(timezone.utc)
         async with self._sf() as s:
             stmt = (
                 sqlite_insert(Listing)
                 .values(
                     id=item.id, source="avito", url=item.full_url, title=item.title,
                     content_hash=item.get_content_hash(), last_price=item.price or None,
-                    condition=report.condition, processed_at=datetime.now(timezone.utc),
+                    condition=report.condition, processed_at=now, last_seen=now,
                     report_json=json.dumps(report.model_dump(), ensure_ascii=False),
                     valuation_json=json.dumps(valuation.model_dump(), ensure_ascii=False),
                 )
@@ -241,7 +243,8 @@ class ListingRepository:
                         "last_price": item.price or None,
                         "content_hash": item.get_content_hash(),
                         "condition": report.condition,
-                        "processed_at": datetime.now(timezone.utc),
+                        "processed_at": now,
+                        "last_seen": now,
                         "report_json": json.dumps(report.model_dump(), ensure_ascii=False),
                         "valuation_json": json.dumps(valuation.model_dump(), ensure_ascii=False),
                     },
@@ -250,20 +253,24 @@ class ListingRepository:
             await s.execute(stmt)
 
     async def cache_listing_skipped(self, item: ParsedListing) -> None:
+        now = datetime.now(timezone.utc)
         async with self._sf() as s:
             stmt = (
                 sqlite_insert(Listing)
                 .values(
                     id=item.id, source="avito", url=item.full_url, title=item.title,
                     last_price=item.price or None, content_hash=item.get_content_hash(),
-                    processed_at=datetime.now(timezone.utc),
+                    processed_at=now, last_seen=now,
                 )
                 .on_conflict_do_update(
                     index_elements=[Listing.id],
                     set_={
                         "last_price": item.price or None,
                         "content_hash": item.get_content_hash(),
-                        "processed_at": datetime.now(timezone.utc),
+                        "processed_at": now,
+                        "last_seen": now,
+                        "report_json": None,
+                        "valuation_json": None,
                     },
                 )
             )
@@ -388,6 +395,8 @@ class AlertRepository:
                         "valuation": json.loads(row.valuation_json),
                         "sub_query": row.sub_query, "attempts": row.attempts,
                         "last_error": row.last_error, "created_at": row.created_at,
+                        "next_attempt_at": row.next_attempt_at,
+                        "dead_reason": row.dead_reason,
                     }
                 )
             return out
@@ -422,6 +431,38 @@ class AlertRepository:
             row = await s.get(PendingAlert, (tg_id, listing_id))
             if row is not None:
                 await s.delete(row)
+
+    async def clear_dead_pending_alerts(self) -> int:
+        """Drop outbox rows that will never be retried again."""
+        async with self._sf() as s:
+            res = await s.execute(
+                delete(PendingAlert).where(PendingAlert.dead_reason.is_not(None))
+            )
+            return int(res.rowcount or 0)
+
+    async def pending_alert_stats(self) -> dict:
+        async with self._sf() as s:
+            pending = (
+                await s.execute(
+                    select(func.count()).select_from(PendingAlert)
+                    .where(PendingAlert.dead_reason.is_(None))
+                )
+            ).scalar() or 0
+            dead = (
+                await s.execute(
+                    select(func.count()).select_from(PendingAlert)
+                    .where(PendingAlert.dead_reason.is_not(None))
+                )
+            ).scalar() or 0
+            oldest = (
+                await s.execute(
+                    select(PendingAlert.created_at)
+                    .where(PendingAlert.dead_reason.is_(None))
+                    .order_by(PendingAlert.created_at)
+                    .limit(1)
+                )
+            ).scalar()
+        return {"pending": int(pending), "dead": int(dead), "oldest": oldest}
 
 
 class ImageRepository:
@@ -496,6 +537,29 @@ class MaintenanceRepository:
             for model, col, days in plan:
                 res = await s.execute(delete(model).where(col < _cut(days)))
                 out[model.__tablename__] = res.rowcount or 0
+        return out
+
+    async def dev_db_stats(self) -> dict[str, int]:
+        """Raw table counters for the owner-only /dev panel."""
+        models = {
+            "devices": DeviceCatalog,
+            "baselines": MarketBaseline,
+            "observations": PriceObservation,
+            "listings": Listing,
+            "sent_alerts": SentAlert,
+            "pending_alerts": PendingAlert,
+            "card_state": CardState,
+            "feedback": DealFeedback,
+        }
+        out: dict[str, int] = {}
+        async with self._sf() as s:
+            for key, model in models.items():
+                out[key] = int(
+                    (
+                        await s.execute(select(func.count()).select_from(model))
+                    ).scalar()
+                    or 0
+                )
         return out
 
 
