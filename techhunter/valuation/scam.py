@@ -248,6 +248,9 @@ def score_listing(
     if visual.get("screen_cracked_visual") and _IDEAL_CLAIM.search(full):
         score -= 22
         cons.append("текст «идеал», но на фото разбитый экран")
+    if "battery_suspicious" in defects:
+        score -= 10
+        cons.append("показания АКБ не сходятся с возрастом или циклами")
 
     # Obfuscation: Latin lookalikes embedded in Cyrillic words. Honest
     # private sellers don't do this; resellers/scammers do.

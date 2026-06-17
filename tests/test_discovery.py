@@ -21,7 +21,6 @@ from techhunter.monitoring import poller as poller_module
 from techhunter.monitoring.poller import AvitoPoller
 from techhunter.notifier import ConsoleNotifier
 from techhunter.scraper.models import ParsedListing
-from techhunter.scraper.session import SessionManager
 from techhunter.valuation.devices import (
     get_model_working_meta,
     get_or_create_device,
@@ -384,6 +383,21 @@ async def test_discovery_threshold_controls() -> None:
     check("aggressive preset", "disc:preset:aggressive" in cbs)
 
 
+async def test_discovery_scan_mode_controls() -> None:
+    from techhunter.bot.screens import screen_discovery
+    from techhunter.storage import set_discovery_scan_mode, upsert_user
+
+    tg = 555003
+    await upsert_user(tg, "t3")
+    await set_discovery_scan_mode(tg, "careful")
+    text, kb = await screen_discovery(tg)
+    cbs = [b.callback_data for row in kb.inline_keyboard for b in row]
+
+    check("careful mode reflected in screen", "3-5" in text)
+    check("fast mode button exists", "disc:mode:fast" in cbs)
+    check("careful mode button exists", "disc:mode:careful" in cbs)
+
+
 async def test_learned_devices_screen() -> None:
     """The price-knowledge screen lists devices the bot has learned."""
     from techhunter.bot.screens import screen_learned
@@ -508,6 +522,142 @@ async def test_fast_poll_uses_hot_scan_window() -> None:
             task.cancel()
 
 
+async def test_fast_poll_groups_and_parallelizes_searches() -> None:
+    calls: list[str] = []
+    active = 0
+    max_active = 0
+
+    class FakeBrowser:
+        def __init__(self) -> None:
+            self.session = SimpleNamespace(is_paused=False)
+
+        async def search(self, query, *args, **kwargs):
+            nonlocal active, max_active
+            calls.append(query)
+            active += 1
+            max_active = max(max_active, active)
+            await asyncio.sleep(0.03)
+            active -= 1
+            return []
+
+    now = datetime.now(timezone.utc)
+
+    def _sub(sid: int, tg_id: int, query: str):
+        return SimpleNamespace(
+            id=sid,
+            tg_id=tg_id,
+            query=query,
+            city_slug="rossiya",
+            min_price=None,
+            max_price=None,
+            min_battery=None,
+            search_pages=1,
+            onboarded_at=now,
+        )
+
+    subs = [
+        _sub(910, 10, "iphone"),
+        _sub(911, 11, "iphone"),
+        _sub(912, 12, "samsung"),
+    ]
+
+    async def active_subs():
+        return subs
+
+    async def no_discovery():
+        return []
+
+    handled: list[int] = []
+
+    async def fake_handle(items, target, *args, **kwargs):
+        handled.append(target.tg_id)
+
+    poller = _make_poller(FakeBrowser())
+    poller.repos.subscriptions.active_subscriptions = active_subs
+    poller.repos.users.discovery_users = no_discovery
+    poller._handle_items = fake_handle  # type: ignore[method-assign]
+    await poller.poll_fast()
+
+    check("identical subscriptions share one search",
+          sorted(calls) == ["iphone", "samsung"])
+    check("different searches run in parallel", max_active == 2)
+    check("shared results still reach every subscriber",
+          sorted(handled) == [10, 11, 12])
+
+
+async def test_careful_discovery_is_throttled_and_has_no_deep_scan() -> None:
+    calls: list[dict] = []
+    handled: list[dict] = []
+
+    class FakeBrowser:
+        def __init__(self) -> None:
+            self.session = SimpleNamespace(is_paused=False)
+
+        async def search(self, *args, **kwargs):
+            calls.append({"args": args, "kwargs": kwargs})
+            return []
+
+    careful_user = SimpleNamespace(
+        tg_id=20,
+        discovery_scan_mode="careful",
+        discovery_min_profit_rub=None,
+        discovery_min_profit_ratio=None,
+    )
+
+    async def no_subs():
+        return []
+
+    async def one_careful_user():
+        return [careful_user]
+
+    async def fake_handle(items, target, *args, **kwargs):
+        handled.append(kwargs)
+
+    old_values = (
+        config.DISCOVERY_CAREFUL_INTERVAL_MIN_SEC,
+        config.DISCOVERY_CAREFUL_INTERVAL_MAX_SEC,
+        config.DISCOVERY_CAREFUL_PAGES,
+        config.DISCOVERY_CAREFUL_DEEP_PER_CYCLE,
+        config.DISCOVERY_CAREFUL_DETAIL_DELAY_SEC,
+        config.DISCOVERY_CAREFUL_SETTLE_DELAY_SEC,
+    )
+    try:
+        config.DISCOVERY_CAREFUL_INTERVAL_MIN_SEC = 1000
+        config.DISCOVERY_CAREFUL_INTERVAL_MAX_SEC = 1000
+        config.DISCOVERY_CAREFUL_PAGES = 1
+        config.DISCOVERY_CAREFUL_DEEP_PER_CYCLE = 3
+        config.DISCOVERY_CAREFUL_DETAIL_DELAY_SEC = (0.0, 0.0)
+        config.DISCOVERY_CAREFUL_SETTLE_DELAY_SEC = (0.0, 0.0)
+
+        poller = _make_poller(FakeBrowser())
+        poller.repos.subscriptions.active_subscriptions = no_subs
+        poller.repos.users.discovery_users = one_careful_user
+        poller._handle_items = fake_handle  # type: ignore[method-assign]
+
+        await poller.poll_fast()
+        await poller.poll_fast()
+        await poller.poll_deep()
+    finally:
+        (
+            config.DISCOVERY_CAREFUL_INTERVAL_MIN_SEC,
+            config.DISCOVERY_CAREFUL_INTERVAL_MAX_SEC,
+            config.DISCOVERY_CAREFUL_PAGES,
+            config.DISCOVERY_CAREFUL_DEEP_PER_CYCLE,
+            config.DISCOVERY_CAREFUL_DETAIL_DELAY_SEC,
+            config.DISCOVERY_CAREFUL_SETTLE_DELAY_SEC,
+        ) = old_values
+
+    check("careful discovery scans only once before cooldown", len(calls) == 1)
+    check("careful discovery scans one page",
+          calls[0]["kwargs"]["pages"] == 1)
+    check("careful discovery uses slower page settle",
+          calls[0]["kwargs"]["settle_delay"] == (0.0, 0.0))
+    check("careful discovery limits detail budget",
+          handled and handled[0]["deep_budget"]["n"] == 3)
+    check("careful discovery passes detail delay",
+          handled[0]["detail_delay"] == (0.0, 0.0))
+
+
 async def test_deep_poll_starts_after_fast_window() -> None:
     calls: list[dict] = []
 
@@ -611,9 +761,12 @@ def main() -> None:
     asyncio.run(test_deal_budget_consumed())
     asyncio.run(test_screen_state_matches_button())
     asyncio.run(test_discovery_threshold_controls())
+    asyncio.run(test_discovery_scan_mode_controls())
     asyncio.run(test_learned_devices_screen())
     asyncio.run(test_blocked_phone_not_a_deal())
     asyncio.run(test_fast_poll_uses_hot_scan_window())
+    asyncio.run(test_fast_poll_groups_and_parallelizes_searches())
+    asyncio.run(test_careful_discovery_is_throttled_and_has_no_deep_scan())
     asyncio.run(test_deep_poll_starts_after_fast_window())
     asyncio.run(test_training_mode_skips_fast_and_deep())
     print("\nAll discovery checks passed.")

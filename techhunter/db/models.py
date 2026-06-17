@@ -54,6 +54,9 @@ class User(Base):
     discovery_city_slug: Mapped[str] = mapped_column(
         String(64), default="rossiya", server_default="'rossiya'"
     )
+    discovery_scan_mode: Mapped[str] = mapped_column(
+        String(16), default="fast", server_default="fast"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -78,6 +81,10 @@ class Subscription(Base):
     # Electronics-specific filter: minimum acceptable battery health %.
     min_battery: Mapped[int | None] = mapped_column(Integer)
     search_pages: Mapped[int | None] = mapped_column(Integer)
+    # 1 = this subscription's scan is paused (kept in the list, not deleted).
+    paused: Mapped[bool] = mapped_column(
+        Integer, default=0, server_default="0"
+    )
     # When the one-time deep market analysis finished. Persisted so a bot
     # restart does NOT re-run onboarding. Also drives periodic refresh.
     onboarded_at: Mapped[datetime | None] = mapped_column(
@@ -217,10 +224,12 @@ class SentAlert(Base):
     __tablename__ = "sent_alerts"
     __table_args__ = (
         Index("ix_sentalert_sent_at", "sent_at"),
+        Index("ix_sentalert_tg_content", "tg_id", "content_hash"),
     )
 
     tg_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     listing_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    content_hash: Mapped[str | None] = mapped_column(String(64))
     price: Mapped[int | None] = mapped_column(Integer)
     profit: Mapped[int | None] = mapped_column(Integer)
     verdict: Mapped[str | None] = mapped_column(String(32))

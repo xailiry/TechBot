@@ -22,7 +22,8 @@ _BROKEN = {
     "screen_cracked", "screen_display_defect", "back_glass_cracked", "no_power",
 }
 _DEFECT = {
-    "screen_replaced", "battery_replaced", "faceid_broken",
+    "screen_replaced", "battery_replaced", "battery_worn",
+    "battery_suspicious", "faceid_broken",
     "truetone_missing", "not_original_parts", "replica", "cosmetic_wear",
 }
 

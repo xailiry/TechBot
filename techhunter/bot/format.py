@@ -22,7 +22,9 @@ DEFECT_RU = {
     "screen_display_defect": "дефект дисплея",
     "back_glass_cracked": "разбита задняя крышка",
     "screen_replaced": "неоригинальный экран",
-    "battery_replaced": "АКБ под замену",
+    "battery_replaced": "АКБ уже заменена",
+    "battery_worn": "АКБ изношена / под замену",
+    "battery_suspicious": "показания АКБ подозрительны",
     "faceid_broken": "Face ID не работает",
     "truetone_missing": "нет True Tone",
     "icloud_locked": "привязка iCloud",
@@ -152,14 +154,14 @@ def format_deal_card(item, report, valuation, sub_query: str = "") -> str:
     # 1. Headline: price + profit (the reason this lot was sent).
     lines.append(f"💰 <b>{fmt_price(item.price)}</b>   {c_emoji} {c_label}")
     if valuation.net_profit is not None:
-        pct = (
-            f" · +{valuation.profit_pct*100:.0f}%"
-            if valuation.profit_pct is not None else ""
+        roi = (
+            f" · ROI +{valuation.roi_pct*100:.0f}%"
+            if valuation.roi_pct is not None else ""
         )
         if valuation.opportunity_type == "broken_flip":
             lines.append(
                 f"🟢 <b>Профит после ремонта: ~"
-                f"{fmt_price(valuation.net_profit)}</b>{pct}"
+                f"{fmt_price(valuation.net_profit)}</b>{roi}"
             )
             if valuation.repair_cost is not None:
                 rb = ", ".join(
@@ -169,12 +171,32 @@ def format_deal_card(item, report, valuation, sub_query: str = "") -> str:
                 lines.append(
                     f"🔧 Ремонт: {fmt_price(valuation.repair_cost)}"
                     + (" (оценочно)" if getattr(valuation, "repair_estimated", False) else "")
+                    + (
+                        f" + резерв {fmt_price(valuation.repair_reserve_rub)}"
+                        if getattr(valuation, "repair_reserve_rub", 0) else ""
+                    )
                     + (f" ({esc(rb)})" if rb else "")
                 )
         else:
             lines.append(
-                f"🟢 <b>Профит: ~{fmt_price(valuation.net_profit)}</b>{pct}"
+                f"🟢 <b>Профит: ~{fmt_price(valuation.net_profit)}</b>{roi}"
             )
+        if (
+            valuation.expected_profit is not None
+            and valuation.expected_profit > valuation.net_profit
+        ):
+            lines.append(
+                f"↗ Обычный сценарий: до {fmt_price(valuation.expected_profit)}"
+            )
+        deal_bits = []
+        if valuation.investment_rub is not None:
+            deal_bits.append(f"вложение {fmt_price(valuation.investment_rub)}")
+        if valuation.profit_pct is not None:
+            deal_bits.append(f"маржа {valuation.profit_pct*100:.0f}%")
+        if valuation.deal_score:
+            deal_bits.append(f"качество {valuation.deal_score}/100")
+        if deal_bits:
+            lines.append("📐 " + " · ".join(deal_bits))
 
     # 2. Specs & Details.
     spec_bits = []
@@ -207,6 +229,15 @@ def format_deal_card(item, report, valuation, sub_query: str = "") -> str:
         }.get(valuation.baseline_confidence)
         if conf:
             lines.append(f"{conf} (выборка {valuation.baseline_sample})")
+    if valuation.resale_price_conservative is not None:
+        resale = f"💵 Продажа: от {fmt_price(valuation.resale_price_conservative)}"
+        if (
+            valuation.resale_price_expected is not None
+            and valuation.resale_price_expected
+            > valuation.resale_price_conservative
+        ):
+            resale += f" до {fmt_price(valuation.resale_price_expected)}"
+        lines.append(resale)
     avito_badge = getattr(item, "avito_price_badge", None)
     if avito_badge == "below":
         lines.append("🏷 Авито: цена ниже рыночной")

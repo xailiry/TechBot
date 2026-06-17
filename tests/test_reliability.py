@@ -9,12 +9,14 @@ import uuid
 from techhunter.ai.evaluate import EvaluationReport
 from techhunter.db import get_session
 from techhunter.db.repository import RepositoryContainer
+from techhunter.monitoring import poller as poller_module
 from techhunter.monitoring.poller import AvitoPoller
 from techhunter.scraper.models import ParsedListing
 from techhunter.storage import (
     alert_already_sent,
     cache_listing,
     cache_listing_skipped,
+    content_alert_already_sent,
     get_cached_listing,
     list_pending_alerts,
     mark_alert_sent,
@@ -23,6 +25,8 @@ from techhunter.storage import (
     queue_pending_alert,
     record_feedback,
     feedback_reason_stats,
+    set_approved,
+    upsert_user,
 )
 from techhunter.valuation.engine import Valuation
 
@@ -104,17 +108,157 @@ async def test_content_hash_card_stable() -> None:
           card.get_content_hash() == detailed.get_content_hash())
 
 
+async def test_repost_with_new_price_is_revalued() -> None:
+    tag = uuid.uuid4().hex
+    old = ParsedListing(
+        id=f"old-{tag}",
+        title=f"iPhone 13 Pro 128 GB {tag}",
+        price=40000,
+        url=f"/old/{tag}",
+        location="Москва",
+        image=f"https://img.example/{tag}.jpg",
+    )
+    new = old.model_copy(
+        update={"id": f"new-{tag}", "price": 30000, "url": f"/new/{tag}"}
+    )
+    await cache_listing(old, _rep(old.id), _val(old.id))
+
+    calls = {"n": 0}
+
+    async def fake_fast_value(item, *, is_discovery=False):
+        return "deal"
+
+    async def fake_process(browser, item, mode="fast"):
+        calls["n"] += 1
+        return _rep(item.id), Valuation(
+            listing_id=item.id,
+            condition="good",
+            baseline_price=60000,
+            net_profit=25000,
+            profit_pct=0.50,
+            opportunity=True,
+            opportunity_type="working",
+            scam_score=70,
+            scam_verdict="unknown",
+        )
+
+    orig_fast = poller_module.fast_value_listing
+    orig_process = poller_module.process_new_listing
+    poller_module.fast_value_listing = fake_fast_value  # type: ignore[assignment]
+    poller_module.process_new_listing = fake_process  # type: ignore[assignment]
+    try:
+        counters = _counters()
+        poller = AvitoPoller(
+            RepositoryContainer(get_session), browser=object(), notifier=object()
+        )
+        _report, valuation = await poller._evaluate(
+            new, asyncio.Semaphore(1), {}, counters
+        )
+    finally:
+        poller_module.fast_value_listing = orig_fast  # type: ignore[assignment]
+        poller_module.process_new_listing = orig_process  # type: ignore[assignment]
+
+    check("repost with changed price is reprocessed", calls["n"] == 1)
+    check("repost receives current valuation",
+          valuation is not None and valuation.listing_id == new.id
+          and valuation.net_profit == 25000)
+
+
 async def test_per_user_dedup() -> None:
     lid = f"rel-{uuid.uuid4().hex}"
     a, b = 700001, 700002
+    content_hash = f"hash-{uuid.uuid4().hex}"
     check("A not sent", not await alert_already_sent(a, lid))
     check("B not sent", not await alert_already_sent(b, lid))
-    await mark_alert_sent(a, lid, price=40000, verdict="unknown")
+    await mark_alert_sent(
+        a, lid, content_hash=content_hash, price=40000, verdict="unknown"
+    )
     check("A sent now", await alert_already_sent(a, lid))
+    check(
+        "same-price repost suppressed",
+        await content_alert_already_sent(a, content_hash, 40000),
+    )
+    check(
+        "tiny repost discount suppressed",
+        await content_alert_already_sent(a, content_hash, 39500),
+    )
+    check(
+        "meaningful repost discount allowed",
+        not await content_alert_already_sent(a, content_hash, 38000),
+    )
     # Another user must still receive it independently (global Listing
     # cache must NOT consume the lot for other users).
     check("B still independent", not await alert_already_sent(b, lid))
+    check(
+        "content dedup is per-user",
+        not await content_alert_already_sent(b, content_hash, 40000),
+    )
     await mark_alert_sent(a, lid)  # idempotent, no error
+
+
+async def test_discovery_roi_and_quality_floors() -> None:
+    tg = 712500 + (uuid.uuid4().int % 1000)
+    await upsert_user(tg, "discovery-quality")
+
+    class Target:
+        tg_id = tg
+        discovery_min_profit_rub = 3000
+        discovery_min_profit_ratio = 0.05
+
+    class Notifier:
+        calls = 0
+
+        async def deal(self, *args, **kwargs):
+            self.calls += 1
+
+    async def run_case(lid: str, roi: float, score: int):
+        item = ParsedListing(
+            id=lid,
+            title=f"iPhone 13 Pro 128 ГБ {lid}",
+            price=40000,
+            url=f"/x/{lid}",
+            image=f"https://img.example/{lid}.jpg",
+        )
+        rep = _rep(lid)
+        val = Valuation(
+            listing_id=lid,
+            condition="good",
+            baseline_price=60000,
+            net_profit=9000,
+            profit_pct=0.18,
+            investment_rub=50000,
+            roi_pct=roi,
+            deal_score=score,
+            opportunity=True,
+            opportunity_type="working",
+            scam_score=80,
+            scam_verdict="original",
+        )
+
+        async def fake_evaluate(*args, **kwargs):
+            return rep, val
+
+        notifier = Notifier()
+        counters = _counters()
+        drops = {}
+        await _poller(notifier, fake_evaluate)._handle_items(
+            [item],
+            Target(),
+            asyncio.Semaphore(1),
+            {},
+            counters,
+            drops,
+            mode="fast",
+        )
+        return notifier.calls, drops
+
+    calls, drops = await run_case(f"low-roi-{uuid.uuid4().hex}", 0.15, 80)
+    check("Discovery low ROI filtered", calls == 0)
+    check("Discovery ROI reason", drops.get("discovery_roi") == 1)
+
+    calls, drops = await run_case(f"low-quality-{uuid.uuid4().hex}", 0.25, 55)
+    check("Discovery low quality filtered", calls == 0)
+    check("Discovery quality reason", drops.get("discovery_quality") == 1)
 
 
 async def test_delivery_failure_not_marked_sent() -> None:
@@ -122,6 +266,8 @@ async def test_delivery_failure_not_marked_sent() -> None:
 
     lid = f"rel-{uuid.uuid4().hex}"
     tg = 710000 + (uuid.uuid4().int % 1000)
+    await upsert_user(tg, f"retry_{tg}")
+    await set_approved(tg, True)
     item = _item(lid)
     rep = _rep(lid)
     val = _val(lid)
@@ -163,6 +309,36 @@ async def test_delivery_failure_not_marked_sent() -> None:
     pending_after = await list_pending_alerts()
     check("queued delivery removed",
           not any(p["tg_id"] == tg and p["listing_id"] == lid for p in pending_after))
+
+
+async def test_revoked_user_pending_alert_is_dropped() -> None:
+    from techhunter import monitor
+
+    lid = f"rel-{uuid.uuid4().hex}"
+    tg = 715000 + (uuid.uuid4().int % 1000)
+    await upsert_user(tg, f"revoked_{tg}")
+    await set_approved(tg, False)
+    await queue_pending_alert(
+        tg,
+        _item(lid),
+        _rep(lid),
+        _val(lid),
+        sub_query="Discovery",
+        error="telegram down",
+    )
+
+    class Notifier:
+        calls = 0
+
+        async def deal(self, *args, **kwargs):
+            self.calls += 1
+
+    notifier = Notifier()
+    await monitor._retry_pending_alerts(notifier)  # type: ignore[arg-type]
+    pending = await list_pending_alerts()
+    check("revoked user pending alert is not sent", notifier.calls == 0)
+    check("revoked user pending alert is removed",
+          not any(p["tg_id"] == tg and p["listing_id"] == lid for p in pending))
 
 
 async def test_pending_alert_backoff_and_dead() -> None:
@@ -511,8 +687,11 @@ async def test_cleanup_old_rows() -> None:
 def main() -> None:
     asyncio.run(test_cache_and_retry())
     asyncio.run(test_content_hash_card_stable())
+    asyncio.run(test_repost_with_new_price_is_revalued())
     asyncio.run(test_per_user_dedup())
+    asyncio.run(test_discovery_roi_and_quality_floors())
     asyncio.run(test_delivery_failure_not_marked_sent())
+    asyncio.run(test_revoked_user_pending_alert_is_dropped())
     asyncio.run(test_pending_alert_backoff_and_dead())
     asyncio.run(test_feedback_threshold_filters_noisy_user())
     asyncio.run(test_feedback_reason_filters_rebuilt_reseller())

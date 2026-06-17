@@ -79,7 +79,7 @@ async def evaluate_listing(
         expected_health = max(50, 100 - (specs.battery_cycles / 30))
         # If health is significantly higher than physically possible (+5% margin), flag it
         if specs.battery_health > expected_health + 5:
-            specs.defects.add("battery_replaced")
+            specs.defects.add("battery_suspicious")
 
     # 2. Old used iPhones with 100% battery usually have a replaced or
     # reprogrammed battery. Current models are allowed to still be at 100%.
@@ -90,7 +90,7 @@ async def evaluate_listing(
         and not specs.is_new
         and not _is_recent_iphone_model(device.model)
     ):
-        specs.defects.add("battery_replaced")
+        specs.defects.add("battery_suspicious")
 
     # 3. Dynamic battery threshold based on iPhone generation
     if specs.battery_health is not None:
@@ -113,7 +113,7 @@ async def evaluate_listing(
             threshold = config.BATTERY_DEFECT_THRESHOLD
         
         if specs.battery_health <= threshold:
-            specs.defects.add("battery_replaced")
+            specs.defects.add("battery_worn")
 
     condition = grade_condition(specs, text)
 

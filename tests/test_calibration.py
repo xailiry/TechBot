@@ -53,7 +53,8 @@ async def case_working_deal() -> None:
     check("WD no defects", rep.defects == [])
     check("WD condition good", rep.condition == "good")
     check("WD model", rep.model == "iPhone 13 Pro [RST]" and rep.storage_gb == 256)
-    check("WD net 18000", val.net_profit == 18000)
+    check("WD expected profit", val.expected_profit == 17000)
+    check("WD conservative net", val.net_profit == 12200)
     check("WD opportunity working",
       val.opportunity is True and val.opportunity_type == "working")
     check("WD not fake", val.scam_verdict != "fake")
@@ -72,9 +73,9 @@ async def case_broken_flip() -> None:
     val = await value_listing(it, rep, log_obs=False)
     check("BF screen_cracked", "screen_cracked" in rep.defects)
     check("BF condition broken", rep.condition == "broken")
-    if val.net_profit != 16000:
+    if val.net_profit != 12300:
         print(f"DEBUG: net_profit={val.net_profit}, repair={val.repair_cost}, market={val.baseline_price}")
-    check("BF net = 45000-22000-7000", val.net_profit == 16000)
+    check("BF conservative net", val.net_profit == 12300)
     check("BF opportunity broken_flip",
           val.opportunity is True and val.opportunity_type == "broken_flip")
     check("BF repair surfaced", val.repair_cost == 7000)
@@ -178,7 +179,7 @@ async def case_low_battery_defect() -> None:
     )
     rep = await evaluate_listing(it, run_clip=False, do_dedup=False)
     check("LB battery 71", rep.battery_health == 71)
-    check("LB battery -> defect", "battery_replaced" in rep.defects)
+    check("LB battery -> defect", "battery_worn" in rep.defects)
     check("LB samsung S22",
           rep.brand == "samsung" and rep.model == "Galaxy S22")
     check("LB condition defect", rep.condition == "defect")
@@ -306,24 +307,24 @@ async def case_battery_cycles_fraud() -> None:
     it = _item("iPhone 13 128GB", "АКБ 96%, 350 циклов перезарядки", 40000)
     rep = await evaluate_listing(it, run_clip=False, do_dedup=False)
     check("Cycles parsed", rep.battery_cycles == 350)
-    check("Cycles fraud detected defect", "battery_replaced" in rep.defects)
+    check("Cycles fraud detected defect", "battery_suspicious" in rep.defects)
 
 
 async def case_dynamic_battery_threshold() -> None:
     await _seed_baseline("apple", "iPhone 15 Pro", 256, 90000)
     it_ip15 = _item("iPhone 15 Pro 256GB", "Идеал, акб 84%, без нюансов", 75000)
     rep_ip15 = await evaluate_listing(it_ip15, run_clip=False, do_dedup=False)
-    check("iPhone 15 Pro battery defect", "battery_replaced" in rep_ip15.defects)
+    check("iPhone 15 Pro battery defect", "battery_worn" in rep_ip15.defects)
     check("iPhone 15 Pro battery condition defect", rep_ip15.condition == "defect")
 
     await _seed_baseline("apple", "iPhone 11", 128, 25000)
     it_ip11_78 = _item("iPhone 11 128GB", "Хорошее сост, акб 78%", 15000)
     rep_ip11_78 = await evaluate_listing(it_ip11_78, run_clip=False, do_dedup=False)
-    check("iPhone 11 battery defect <= 79", "battery_replaced" in rep_ip11_78.defects)
+    check("iPhone 11 battery defect <= 79", "battery_worn" in rep_ip11_78.defects)
 
     it_ip11_80 = _item("iPhone 11 128GB", "Хорошее сост, акб 80%", 16000)
     rep_ip11_80 = await evaluate_listing(it_ip11_80, run_clip=False, do_dedup=False)
-    check("iPhone 11 battery ok >= 80", "battery_replaced" not in rep_ip11_80.defects)
+    check("iPhone 11 battery ok >= 80", "battery_worn" not in rep_ip11_80.defects)
 
 
 async def case_old_iphone_100_battery_red_flag() -> None:
@@ -334,7 +335,7 @@ async def case_old_iphone_100_battery_red_flag() -> None:
     )
     rep_old = await evaluate_listing(it_old, run_clip=False, do_dedup=False)
     check("old iPhone 100 battery flagged",
-          "battery_replaced" in rep_old.defects)
+          "battery_suspicious" in rep_old.defects)
     check("old iPhone 100 battery condition defect",
           rep_old.condition == "defect")
 
@@ -345,7 +346,7 @@ async def case_old_iphone_100_battery_red_flag() -> None:
     )
     rep_new = await evaluate_listing(it_new, run_clip=False, do_dedup=False)
     check("new old-generation iPhone 100 allowed",
-          "battery_replaced" not in rep_new.defects)
+          "battery_suspicious" not in rep_new.defects)
 
     it_recent = _item(
         "iPhone 16e 128GB",
@@ -354,7 +355,7 @@ async def case_old_iphone_100_battery_red_flag() -> None:
     )
     rep_recent = await evaluate_listing(it_recent, run_clip=False, do_dedup=False)
     check("recent iPhone 100 allowed",
-          "battery_replaced" not in rep_recent.defects)
+          "battery_suspicious" not in rep_recent.defects)
 
 
 async def case_repairable_gems() -> None:
@@ -366,7 +367,7 @@ async def case_repairable_gems() -> None:
     check("FaceID defect code", "faceid_broken" in rep_faceid.defects)
     check("FaceID condition defect", rep_faceid.condition == "defect")
     check("FaceID repair flips", val_faceid.opportunity is True and val_faceid.opportunity_type == "broken_flip")
-    check("FaceID net matches repair cost", val_faceid.net_profit == 55000 - 35000 - 5000)
+    check("FaceID conservative net", val_faceid.net_profit == 10700)
 
     dev_id = await get_or_create_device("apple", "iPhone 13", 128)
     from techhunter.db import get_session
@@ -385,7 +386,7 @@ async def case_repairable_gems() -> None:
     rep_as_is = await evaluate_listing(it_as_is, run_clip=False, do_dedup=False)
     val_as_is = await value_listing(it_as_is, rep_as_is, log_obs=False)
     check("As-is condition baseline exists", val_as_is.condition_baselines.get("defect") == 42000)
-    check("As-is net matches defect median", val_as_is.net_profit == 42000 - 30000)
+    check("As-is conservative net", val_as_is.net_profit == 8480)
     check("As-is opportunity working", val_as_is.opportunity is True and val_as_is.opportunity_type == "working")
 
     await set_repair_cost("apple", "iPhone 13", "no_power", 8000)
@@ -395,7 +396,7 @@ async def case_repairable_gems() -> None:
     check("no_power in defects", "no_power" in rep_nopower.defects)
     check("no_power condition broken", rep_nopower.condition == "broken")
     check("no_power flips to working", val_nopower.opportunity is True and val_nopower.opportunity_type == "broken_flip")
-    check("no_power net profit matches", val_nopower.net_profit == 55000 - 20000 - 8000)
+    check("no_power conservative net", val_nopower.net_profit == 22700)
 
 
 async def _main() -> None:

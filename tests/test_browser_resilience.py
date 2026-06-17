@@ -172,6 +172,41 @@ async def test_restart_rate_limited() -> None:
     check("no restart on timeout", calls["start"] == 0)
 
 
+async def test_graceful_restart_waits_for_active_page() -> None:
+    b = AvitoBrowser()
+    calls = {"stop": 0, "start": 0}
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _start():
+        calls["start"] += 1
+
+    async def _stop():
+        calls["stop"] += 1
+
+    async def _holder():
+        async with b.acquire_page():
+            entered.set()
+            await release.wait()
+
+    b.start = _start  # type: ignore[method-assign]
+    b.stop = _stop  # type: ignore[method-assign]
+    b._available = asyncio.Queue()
+    b._available.put_nowait(FakePage())
+    b._last_restart = 0.0
+
+    holder = asyncio.create_task(_holder())
+    await entered.wait()
+    restart = asyncio.create_task(b.restart())
+    await asyncio.sleep(0.05)
+    check("graceful restart waits for active page", calls["stop"] == 0)
+
+    release.set()
+    await asyncio.gather(holder, restart)
+    check("graceful restart runs after release",
+          calls["stop"] == 1 and calls["start"] == 2)
+
+
 async def test_pools_independent() -> None:
     b = AvitoBrowser()
 
@@ -334,6 +369,7 @@ def main() -> None:
     asyncio.run(test_transient_tabs_are_capped())
     asyncio.run(test_release_after_pool_swap())
     asyncio.run(test_restart_rate_limited())
+    asyncio.run(test_graceful_restart_waits_for_active_page())
     asyncio.run(test_pools_independent())
     asyncio.run(test_captcha_notify_force_bypasses_throttle())
     test_captcha_overlay_never_counts_as_cleared()

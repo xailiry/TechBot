@@ -58,10 +58,22 @@ class UserRepository:
             u = await s.get(User, tg_id)
             return bool(u and u.is_approved)
 
+    async def has_background_access(self, tg_id: int) -> bool:
+        if tg_id in config.ADMIN_USER_IDS:
+            return True
+        return await self.is_user_approved(tg_id)
+
     async def discovery_users(self) -> list[User]:
         async with self._sf() as s:
             rows = await s.execute(
-                select(User).where(User.discovery_enabled == 1, User.paused == 0)
+                select(User).where(
+                    User.discovery_enabled == 1,
+                    User.paused == 0,
+                    or_(
+                        User.is_approved == 1,
+                        User.tg_id.in_(config.ADMIN_USER_IDS),
+                    ),
+                )
             )
             return list(rows.scalars().all())
 
@@ -139,6 +151,14 @@ class UserRepository:
                 if ratio is not None:
                     user.discovery_min_profit_ratio = ratio
 
+    async def set_discovery_scan_mode(self, tg_id: int, mode: str) -> None:
+        if mode not in {"fast", "careful"}:
+            raise ValueError("Unknown discovery scan mode")
+        async with self._sf() as s:
+            user = await s.get(User, tg_id)
+            if user is not None:
+                user.discovery_scan_mode = mode
+
 
 class SubscriptionRepository:
     def __init__(self, session_factory: Callable[[], AsyncContextManager[AsyncSession]]):
@@ -165,7 +185,14 @@ class SubscriptionRepository:
             rows = await s.execute(
                 select(Subscription)
                 .join(User, User.tg_id == Subscription.tg_id)
-                .where(User.paused == 0)
+                .where(
+                    User.paused == 0,
+                    Subscription.paused == 0,
+                    or_(
+                        User.is_approved == 1,
+                        User.tg_id.in_(config.ADMIN_USER_IDS),
+                    ),
+                )
                 .order_by(Subscription.id)
             )
             return list(rows.scalars().all())
@@ -189,6 +216,16 @@ class SubscriptionRepository:
                 return False
             await s.delete(sub)
             return True
+
+    async def toggle_subscription_paused(self, tg_id: int, sub_id: int) -> bool | None:
+        """Flip one subscription's paused flag. Returns the new state
+        (True = now paused), or None if the subscription is not the user's."""
+        async with self._sf() as s:
+            sub = await s.get(Subscription, sub_id)
+            if sub is None or sub.tg_id != tg_id:
+                return None
+            sub.paused = 0 if sub.paused else 1
+            return bool(sub.paused)
 
     async def mark_subscription_onboarded(self, sub_id: int) -> None:
         async with self._sf() as s:
@@ -328,8 +365,39 @@ class AlertRepository:
             row = await s.get(SentAlert, (tg_id, listing_id))
             return row is not None
 
+    async def content_alert_already_sent(
+        self,
+        tg_id: int,
+        content_hash: str,
+        price: int | None,
+    ) -> bool:
+        """Suppress a repost unless it became meaningfully cheaper."""
+        if not content_hash:
+            return False
+        async with self._sf() as s:
+            rows = (
+                await s.execute(
+                    select(SentAlert.price).where(
+                        SentAlert.tg_id == tg_id,
+                        SentAlert.content_hash == content_hash,
+                    )
+                )
+            ).scalars().all()
+        if not rows:
+            return False
+        known_prices = [int(old) for old in rows if old is not None]
+        if price is None or not known_prices:
+            return True
+        best_old_price = min(known_prices)
+        required_drop = max(
+            config.REPOST_MIN_PRICE_DROP_RUB,
+            int(round(best_old_price * config.REPOST_MIN_PRICE_DROP_RATIO)),
+        )
+        return best_old_price - int(price) < required_drop
+
     async def mark_alert_sent(
         self, tg_id: int, listing_id: str, *,
+        content_hash: str | None = None,
         price: int | None = None, profit: int | None = None,
         verdict: str | None = None, condition: str | None = None,
         sub_query: str | None = None,
@@ -338,7 +406,8 @@ class AlertRepository:
             stmt = (
                 sqlite_insert(SentAlert)
                 .values(
-                    tg_id=tg_id, listing_id=listing_id, price=price, profit=profit,
+                    tg_id=tg_id, listing_id=listing_id,
+                    content_hash=content_hash, price=price, profit=profit,
                     verdict=verdict, condition=condition, sub_query=sub_query,
                 )
                 .on_conflict_do_nothing(index_elements=[SentAlert.tg_id, SentAlert.listing_id])

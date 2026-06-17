@@ -6,7 +6,9 @@ Defect codes:
   screen_cracked      front glass / display physically broken
   back_glass_cracked  rear glass / housing broken
   screen_replaced     non-original display installed
-  battery_replaced    non-original / swollen / weak battery, or low health
+  battery_replaced    seller says the battery was already replaced
+  battery_worn        weak/swollen battery or low reported health
+  battery_suspicious  health/cycle values look reprogrammed or implausible
   faceid_broken       Face ID / Touch ID not working
   truetone_missing    True Tone gone (typical after a screen swap)
   icloud_locked       iCloud/Activation Lock/Google lock, or otherwise
@@ -99,8 +101,13 @@ _DEFECT_PATTERNS: list[tuple[str, str]] = [
      r"(?:менял\w*|поменя\w*)\s*(?:экран\w*|диспл\w*|модул\w*)|"
      r"диспл\w*\s*не\s*родн|копийн\w*\s*экран|"
      r"(?:экран\w*|диспл\w*)\s*(?:замен|менял|поменя|неоригинал|не\s*родн|аналог)", "screen_replaced"),
-    (r"замен\w*\s*(?:акб|аккумулятор|батаре)|акб\s*(?:под\s*замен|сла[бч]|"
-     r"быстро\s*сад|вздут)|батаре\w*\s*вздут|нужн\w*\s*замен\w*\s*акб", "battery_replaced"),
+    (r"(?:заменил\w*|поменял\w*|установил\w*)\s*"
+     r"(?:акб|аккумулятор|батаре)|"
+     r"(?:акб|аккумулятор|батаре\w*)\s*"
+     r"(?:заменен|заменён|заменили|поменян|поменяли|новый)", "battery_replaced"),
+    (r"акб\s*(?:под\s*замен|сла[бч]|быстро\s*сад|вздут)|"
+     r"батаре\w*\s*(?:вздут|сла[бч]|быстро\s*сад)|"
+     r"нужн\w*\s*замен\w*\s*(?:акб|аккумулятор|батаре)", "battery_worn"),
     (r"face\s*id\s*(?:не\s*раб|сломан|нет|отсутств|ошибк)|"
      r"не\s*работает\s*face|тач\s*айди\s*не|touch\s*id\s*не|отпечаток\s*(?:не\s*раб|не\s*скан)", "faceid_broken"),
     (r"тру\s*тон\w*\s*(?:нет|отсутств|не\s*раб)|нет\s*tru[e]?\s*tone|"

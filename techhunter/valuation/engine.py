@@ -95,11 +95,18 @@ class Valuation(BaseModel):
     repair_cost: int | None = None
     repair_breakdown: dict[str, int] = Field(default_factory=dict)
     repair_estimated: bool = False
+    repair_reserve_rub: int = 0
     shoplike: bool = False
 
+    resale_price_expected: int | None = None
+    resale_price_conservative: int | None = None
     gross_profit: int | None = None
+    expected_profit: int | None = None
     net_profit: int | None = None
     profit_pct: float | None = None
+    investment_rub: int | None = None
+    roi_pct: float | None = None
+    deal_score: int = 0
 
     opportunity: bool = False
     opportunity_type: str = "none"  # working | broken_flip | none
@@ -111,6 +118,87 @@ class Valuation(BaseModel):
     # Why we could not (fully) value it: no_device | no_baseline |
     # repair_cost_unknown | for_parts | flip_blocked
     missing: list[str] = Field(default_factory=list)
+
+
+def _safety_buffer(confidence: str) -> float:
+    return {
+        "high": config.PROFIT_SAFETY_BUFFER_HIGH,
+        "medium": config.PROFIT_SAFETY_BUFFER_MEDIUM,
+        "low": config.PROFIT_SAFETY_BUFFER_LOW,
+    }.get(confidence, config.PROFIT_SAFETY_BUFFER_LOW)
+
+
+def _project_profit(
+    v: Valuation,
+    *,
+    purchase_price: int,
+    resale_baseline: int,
+    repair_cost: int = 0,
+    repair_estimated: bool = False,
+) -> None:
+    """Populate expected and conservative flip economics."""
+    expected_resale = int(
+        resale_baseline * (1 - config.PROFIT_HAGGLE_PERCENT)
+    )
+    conservative_resale = int(
+        expected_resale * (1 - _safety_buffer(v.baseline_confidence))
+    )
+    repair_reserve = (
+        int(round(repair_cost * config.REPAIR_ESTIMATE_BUFFER_RATIO))
+        if repair_estimated and repair_cost > 0
+        else 0
+    )
+    effective_repair = repair_cost + repair_reserve
+    overhead = config.PROFIT_OVERHEAD_RUB
+    investment = purchase_price + effective_repair + overhead
+
+    v.resale_price_expected = expected_resale
+    v.resale_price_conservative = conservative_resale
+    v.repair_reserve_rub = repair_reserve
+    v.gross_profit = expected_resale - purchase_price
+    v.expected_profit = expected_resale - purchase_price - repair_cost - overhead
+    v.net_profit = (
+        conservative_resale - purchase_price - effective_repair - overhead
+    )
+    v.investment_rub = investment
+    if conservative_resale > 0:
+        v.profit_pct = round(v.net_profit / conservative_resale, 4)
+    if investment > 0:
+        v.roi_pct = round(v.net_profit / investment, 4)
+
+
+def _deal_score(v: Valuation) -> int:
+    """Explainable 0..100 quality score for delivery ranking."""
+    if v.net_profit is None or v.roi_pct is None:
+        return 0
+    trust_points = max(0.0, min(45.0, v.scam_score * 0.45))
+    roi_points = max(0.0, min(25.0, v.roi_pct * 100))
+    profit_points = max(0.0, min(15.0, v.net_profit / 1000 * 1.5))
+    confidence_points = {
+        "high": 10.0,
+        "medium": 6.0,
+        "low": 0.0,
+    }.get(v.baseline_confidence, 0.0)
+    penalty = 0.0
+    if v.shoplike:
+        penalty += 8.0
+    if v.repair_estimated:
+        penalty += 5.0
+    if v.scam_verdict == "suspicious":
+        penalty += 10.0
+    return max(
+        0,
+        min(
+            100,
+            int(round(
+                trust_points
+                + roi_points
+                + profit_points
+                + confidence_points
+                - penalty
+            )),
+        ),
+    )
 
 
 async def fast_value_listing(
@@ -373,13 +461,6 @@ async def value_listing(
         v.missing = missing
         return v
 
-    # Honest market price: median minus expected haggle.
-    market = comparison_baseline * (1 - config.PROFIT_HAGGLE_PERCENT)
-
-    if (item.price or 0) > 0:
-        v.gross_profit = int(market - item.price)
-
-    overhead = config.PROFIT_OVERHEAD_RUB
     cond = report.condition
     market_badge_conflict = (
         bool(getattr(item, "avito_market_badge", False))
@@ -391,8 +472,12 @@ async def value_listing(
     )
 
     if Condition(cond).is_working:
-        if v.gross_profit is not None:
-            v.net_profit = v.gross_profit - overhead
+        if (item.price or 0) > 0:
+            _project_profit(
+                v,
+                purchase_price=item.price,
+                resale_baseline=comparison_baseline,
+            )
             v.opportunity_type = "working"
     elif cond == "for_parts":
         missing.append("for_parts")
@@ -413,10 +498,11 @@ async def value_listing(
             defect_baseline = v.condition_baselines.get("defect")
             if cond == "defect" and defect_baseline is not None:
                 if (item.price or 0) > 0:
-                    v.net_profit = (
-                        int(defect_baseline * (1 - config.PROFIT_HAGGLE_PERCENT))
-                        - item.price
-                        - overhead
+                    v.baseline_price = defect_baseline
+                    _project_profit(
+                        v,
+                        purchase_price=item.price,
+                        resale_baseline=defect_baseline,
                     )
                     v.opportunity_type = "working"
             else:
@@ -424,14 +510,22 @@ async def value_listing(
         else:
             v.repair_cost = total
             if (item.price or 0) > 0:
-                v.net_profit = int(market - item.price - total - overhead)
+                _project_profit(
+                    v,
+                    purchase_price=item.price,
+                    resale_baseline=comparison_baseline,
+                    repair_cost=total or 0,
+                    repair_estimated=estimated,
+                )
                 v.opportunity_type = "broken_flip"
 
-    if v.net_profit is not None and market:
-        v.profit_pct = round(v.net_profit / market, 4)
+    if v.net_profit is not None:
+        v.deal_score = _deal_score(v)
         v.opportunity = (
             v.net_profit >= config.MIN_PROFIT_RUB
-            and v.profit_pct >= config.MIN_PROFIT_RATIO
+            and (v.profit_pct or 0.0) >= config.MIN_PROFIT_RATIO
+            and (v.roi_pct or 0.0) >= config.MIN_ROI_RATIO
+            and v.deal_score >= config.MIN_DEAL_SCORE
             and scam.verdict != "fake"
         )
         if v.opportunity and market_badge_conflict:

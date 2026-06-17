@@ -8,6 +8,7 @@ import asyncio
 import sys
 import uuid
 
+from techhunter import config
 from techhunter.ai.evaluate import EvaluationReport
 from techhunter.scraper.models import ParsedListing
 from techhunter.valuation.clustering import cluster_high_median, robust_median
@@ -194,6 +195,23 @@ async def test_devices_baseline() -> None:
     check("old changed-price observation removed", 50000 not in changed_prices)
     check("new changed-price observation present", 51000 in changed_prices)
 
+    repeated = await get_or_create_device(
+        "apple", f"iPhone REPEATED {tag}", 128
+    )
+    for i in range(8):
+        await log_observation(
+            repeated, "good", 35500, listing_id=f"repeat-{tag}-{i}"
+        )
+    for i, price in enumerate(range(20000, 30000, 1000)):
+        await log_observation(
+            repeated, "good", price, listing_id=f"unique-{tag}-{i}"
+        )
+    repeated_prices = await _prices(repeated, ("good",))
+    check(
+        "identical market prices capped",
+        repeated_prices.count(35500) == config.BASELINE_IDENTICAL_PRICE_CAP,
+    )
+
     # Enough real obs incl. scam lows -> learns the genuine cluster.
     for p in (60000, 61000, 59000, 62000, 60500, 59500, 61500, 5000, 5500, 60200, 61100, 59800, 61200):
         await log_observation(d1, "good", p)
@@ -235,6 +253,28 @@ async def test_repair() -> None:
           total_meta is not None and bd_meta and not miss_meta
           and blocked_meta is False and est_meta is True)
 
+    replaced_total, replaced_bd, replaced_miss, _, _ = (
+        await estimate_repairs_meta(
+            "apple", "iPhone 13 Pro", ["battery_replaced"]
+        )
+    )
+    check(
+        "already replaced battery has no future repair",
+        replaced_total == 0 and replaced_bd == {} and replaced_miss == [],
+    )
+    worn_total, worn_bd, worn_miss, _, worn_est = (
+        await estimate_repairs_meta(
+            "apple", "iPhone 13 Pro", ["battery_worn"]
+        )
+    )
+    check(
+        "worn battery gets repair cost",
+        worn_total == 4500
+        and worn_bd == {"battery": 4500}
+        and worn_miss == []
+        and worn_est,
+    )
+
     total2, _, miss2, _ = await estimate_repairs(
         brand, "iPhone 13", ["back_glass_cracked"]
     )
@@ -266,7 +306,9 @@ async def test_engine() -> None:
     await set_manual_baseline(dev, 60000)
     rep = _report(f"iPhone WD {tag}", "good")
     val = await value_listing(_item(45000), rep)
-    check("working net", val.net_profit == 15000)
+    check("working expected profit", val.expected_profit == 14000)
+    check("working conservative net", val.net_profit == 10400)
+    check("working ROI on invested cash", val.roi_pct == 0.2261)
     check("working opportunity", val.opportunity is True)
     check("working type", val.opportunity_type == "working")
 
@@ -292,7 +334,8 @@ async def test_engine() -> None:
     vb = await value_listing(
         _item(30000, title=f"{bmodel} разбит экран"), rb
     )
-    check("broken net = base-price-repair", vb.net_profit == 22000)
+    check("broken expected profit", vb.expected_profit == 21000)
+    check("broken conservative net", vb.net_profit == 17400)
     check("broken opportunity", vb.opportunity is True)
     check("broken type", vb.opportunity_type == "broken_flip")
     check("repair cost surfaced", vb.repair_cost == 8000)

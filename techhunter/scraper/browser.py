@@ -43,6 +43,9 @@ class AvitoBrowser:
         self._profile_lock_file = None
         self._lock = asyncio.Lock()
         self._restart_lock = asyncio.Lock()
+        self._lease_condition = asyncio.Condition()
+        self._active_leases = 0
+        self._restart_pending = False
         self._last_restart = 0.0
         self._last_captcha_notify = 0.0
         self._captcha_solved_page: Page | None = None
@@ -74,20 +77,32 @@ class AvitoBrowser:
             await Stealth().apply_stealth_async(page)
         return page
 
-    async def restart(self) -> None:
+    async def restart(self, *, graceful: bool = True) -> None:
         async with self._restart_lock:
             now = time.time()
             if now - self._last_restart < config.BROWSER_RESTART_COOLDOWN_SEC:
                 return
             self._last_restart = now
-            log.warning("Browser: restarting (dead context/crash).")
-            await self.stop()
-            await self.start()
+            async with self._lease_condition:
+                self._restart_pending = True
+            try:
+                if graceful:
+                    async with self._lease_condition:
+                        await self._lease_condition.wait_for(
+                            lambda: self._active_leases == 0
+                        )
+                log.warning("Browser: restarting (dead context/crash).")
+                await self.stop()
+                await self.start()
+            finally:
+                async with self._lease_condition:
+                    self._restart_pending = False
+                    self._lease_condition.notify_all()
 
     async def _maybe_restart(self, err: object) -> None:
         if self._is_closed_error(err):
             with contextlib.suppress(Exception):
-                await self.restart()
+                await self.restart(graceful=False)
 
     # ─── lifecycle ──────────────────────────────────────────────────────────
 
@@ -263,53 +278,67 @@ class AvitoBrowser:
 
     @contextlib.asynccontextmanager
     async def acquire_page(self, mode: str = "fast"):
-        await self.start()
-        
-        while self.session.is_paused:
-            await self.session.wait_for_unblock()
-            
-        pool = self._select_pool(mode)
+        async with self._lease_condition:
+            await self._lease_condition.wait_for(lambda: not self._restart_pending)
+            self._active_leases += 1
+
+        page = None
+        pool = None
         transient = False
         transient_slot = False
+        restart_error = None
         try:
-            page = await asyncio.wait_for(
-                pool.get(),
-                timeout=max(0.0, config.PAGE_ACQUIRE_TIMEOUT_SEC),
-            )
-        except asyncio.TimeoutError:
-            if config.MAX_TRANSIENT_PAGES <= 0:
-                page = await pool.get()
-            else:
-                await self._transient_slots.acquire()
-                transient_slot = True
-                try:
-                    page = pool.get_nowait()
-                    self._transient_slots.release()
-                    transient_slot = False
-                except asyncio.QueueEmpty:
-                    page = await self._new_stealth_page()
-                    transient = True
-        try:
+            await self.start()
+
+            while self.session.is_paused:
+                await self.session.wait_for_unblock()
+
+            pool = self._select_pool(mode)
+            try:
+                page = await asyncio.wait_for(
+                    pool.get(),
+                    timeout=max(0.0, config.PAGE_ACQUIRE_TIMEOUT_SEC),
+                )
+            except asyncio.TimeoutError:
+                if config.MAX_TRANSIENT_PAGES <= 0:
+                    page = await pool.get()
+                else:
+                    await self._transient_slots.acquire()
+                    transient_slot = True
+                    try:
+                        page = pool.get_nowait()
+                        self._transient_slots.release()
+                        transient_slot = False
+                    except asyncio.QueueEmpty:
+                        page = await self._new_stealth_page()
+                        transient = True
+
             if self._is_page_closed(page):
                 page = await self._new_stealth_page()
                 transient = True
             yield page
         except Exception as e:
-            await self._maybe_restart(e)
+            restart_error = e
             raise
         finally:
-            current_pool = self._select_pool(mode)
-            if transient or pool is not current_pool:
-                await self._close_page(page)
-            elif self._is_page_closed(page):
-                try:
-                    current_pool.put_nowait(await self._new_stealth_page())
-                except Exception as e:
-                    log.error("acquire_page: failed to replace dead page: %s", e)
-            else:
-                current_pool.put_nowait(page)
+            if page is not None and pool is not None:
+                current_pool = self._select_pool(mode)
+                if transient or pool is not current_pool:
+                    await self._close_page(page)
+                elif self._is_page_closed(page):
+                    try:
+                        current_pool.put_nowait(await self._new_stealth_page())
+                    except Exception as e:
+                        log.error("acquire_page: failed to replace dead page: %s", e)
+                else:
+                    current_pool.put_nowait(page)
             if transient_slot:
                 self._transient_slots.release()
+            async with self._lease_condition:
+                self._active_leases -= 1
+                self._lease_condition.notify_all()
+            if restart_error is not None:
+                await self._maybe_restart(restart_error)
 
     # ─── search ─────────────────────────────────────────────────────────────
 
@@ -348,6 +377,7 @@ class AvitoBrowser:
         pages: int = 1,
         start_page: int = 1,
         mode: str = "fast",
+        settle_delay: tuple[float, float] | None = None,
     ) -> list[ParsedListing]:
         pages = max(1, pages)
         async with self.acquire_page(mode=mode) as page:
@@ -359,7 +389,9 @@ class AvitoBrowser:
                     await page.goto(url, wait_until="domcontentloaded", timeout=config.NAV_TIMEOUT_MS)
                     with contextlib.suppress(Exception):
                         await page.wait_for_selector('[data-marker="item"], [data-marker="catalog-serp"], [data-marker="captcha"]', timeout=6000)
-                    await asyncio.sleep(random.uniform(0.2, 0.6))
+                    await asyncio.sleep(
+                        random.uniform(*(settle_delay or (0.2, 0.6)))
+                    )
                     html = await page.content()
                 except Exception as e:
                     log.warning("search %r p%d navigation failed: %s", query, page_num, e)

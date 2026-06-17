@@ -31,11 +31,13 @@ class MonitorManager:
 
     async def _fast_loop(self):
         while True:
+            started_at = asyncio.get_running_loop().time()
             try:
                 await self.poller.poll_fast()
             except Exception as e:
                 log.exception("Fast loop crashed: %s", e)
-            await asyncio.sleep(config.POLL_INTERVAL_SEC)
+            elapsed = asyncio.get_running_loop().time() - started_at
+            await asyncio.sleep(max(0.0, config.POLL_INTERVAL_SEC - elapsed))
 
     async def _deep_loop(self):
         while True:

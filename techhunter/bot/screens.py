@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from .. import config, runtime
+from .. import config, runtime, settings_store
 from ..ai.normalize import normalize_device
 from ..delivery import SELECTABLE_CONDITIONS
 from ..storage import (
@@ -51,6 +51,9 @@ _REASON_RU = {
     "low_score": "низкая надёжность",
     "excluded_condition": "состояние",
     "discovery_threshold": "невыгодно",
+    "discovery_roi": "низкий ROI",
+    "discovery_quality": "качество сделки",
+    "duplicate_repost": "повтор объявления",
     "feedback_threshold": "личный порог",
     "low_battery": "низкая АКБ",
     "no_baseline": "нет базы",
@@ -215,13 +218,16 @@ async def screen_discovery(tg_id: int) -> tuple[str, InlineKeyboardMarkup]:
     on = False
     min_rub = config.DISCOVERY_MIN_PROFIT_RUB
     min_ratio = config.DISCOVERY_MIN_PROFIT_RATIO
+    scan_mode = "fast"
     async with get_session() as s:
         u = await s.get(User, tg_id)
         if u:
             on = bool(u.discovery_enabled)
             min_rub = int(u.discovery_min_profit_rub)
             min_ratio = float(u.discovery_min_profit_ratio)
+            scan_mode = u.discovery_scan_mode or "fast"
     learned = await count_working_baselines()
+    mode_label = "Быстрый" if scan_mode == "fast" else "Аккуратный"
 
     lines = [
         f"🔎 <b>Радар Discovery: {'ВКЛ' if on else 'ВЫКЛ'}</b>",
@@ -231,7 +237,14 @@ async def screen_discovery(tg_id: int) -> tuple[str, InlineKeyboardMarkup]:
         "",
         f"Порог профита: <b>{fmt_price(min_rub)}</b>",
         f"Порог маржи: <b>{int(min_ratio * 100)}%</b>",
+        f"Минимальный ROI: <b>{config.DISCOVERY_MIN_ROI_RATIO * 100:.0f}%</b>",
+        f"Качество сделки: <b>{config.DISCOVERY_MIN_DEAL_SCORE}/100</b>",
         f"База цен: <b>{learned}</b> моделей",
+        f"Темп сканирования: <b>{mode_label}</b>",
+        "",
+        "<b>Быстрый</b> - как сейчас: частые проходы и глубокий поиск.",
+        "<b>Аккуратный</b> - 1 страница раз в 3-5 минут, до 3 карточек, "
+        "без глубокого обхода. Подходит, чтобы оставить бота без присмотра.",
         "",
         "Пресеты:",
         "Строго — меньше шума. Баланс — рабочий режим. "
@@ -246,6 +259,16 @@ async def screen_discovery(tg_id: int) -> tuple[str, InlineKeyboardMarkup]:
             text="❌ Выключить Discovery" if on else "✅ Включить Discovery",
             callback_data="disc:off" if on else "disc:on",
         )],
+        [
+            InlineKeyboardButton(
+                text=("Быстрый ✓" if scan_mode == "fast" else "Быстрый"),
+                callback_data="disc:mode:fast",
+            ),
+            InlineKeyboardButton(
+                text=("Аккуратный ✓" if scan_mode == "careful" else "Аккуратный"),
+                callback_data="disc:mode:careful",
+            ),
+        ],
         [
             InlineKeyboardButton(text="Строго", callback_data="disc:preset:strict"),
             InlineKeyboardButton(text="Баланс", callback_data="disc:preset:balance"),
@@ -327,9 +350,15 @@ async def screen_subs(tg_id: int, page: int = 0) -> tuple[str, InlineKeyboardMar
         if s.min_battery:
             bits.append(f"АКБ≥{s.min_battery}%")
         bits.append("РФ" if s.city_slug == "rossiya" else s.city_slug.capitalize())
-        lines.append(f"<b>#{s.id}</b> {esc(s.query)}\n  {' · '.join(bits)}")
+        paused = bool(getattr(s, "paused", 0))
+        status = " ⏸ на паузе" if paused else ""
+        lines.append(f"<b>#{s.id}</b> {esc(s.query)}{status}\n  {' · '.join(bits)}")
         rows.append([
             InlineKeyboardButton(text=f"цены #{s.id}", callback_data=f"nav:prices:{s.id}"),
+            InlineKeyboardButton(
+                text=(f"▶️ вкл #{s.id}" if paused else f"⏸ пауза #{s.id}"),
+                callback_data=f"sub:pause:{s.id}:{page}",
+            ),
             InlineKeyboardButton(text=f"удалить #{s.id}", callback_data=f"sub:del:{s.id}:{page}"),
         ])
 
@@ -483,6 +512,10 @@ async def screen_dev(raw: bool = False) -> tuple[str, InlineKeyboardMarkup]:
         f"restart_interval={config.BROWSER_RESTART_INTERVAL_SEC}s "
         f"profile_lock=enabled",
         "",
+        "<b>Channel</b>",
+        f"id={esc(config.DEMO_CHANNEL_ID) if config.DEMO_CHANNEL_ID is not None else 'не настроен'} "
+        f"mirror={'ВКЛ' if settings_store.channel_enabled() else 'ВЫКЛ'}",
+        "",
         "<b>DB</b>",
         " · ".join(f"{k}={v}" for k, v in db.items()),
     ]
@@ -506,8 +539,18 @@ async def screen_dev(raw: bool = False) -> tuple[str, InlineKeyboardMarkup]:
             InlineKeyboardButton(text="Relearn stale", callback_data="dev:confirm:relearn_stale"),
             InlineKeyboardButton(text="Cleanup rows", callback_data="dev:confirm:cleanup_old_rows"),
         ],
-        [InlineKeyboardButton(text="Back to normal UI", callback_data="nav:hub")],
     ]
+    if config.DEMO_CHANNEL_ID is not None:
+        ch_on = settings_store.channel_enabled()
+        rows.append([
+            InlineKeyboardButton(
+                text=("📡 Канал: выключить" if ch_on else "📡 Канал: включить"),
+                callback_data="dev:channel",
+            )
+        ])
+    rows.append(
+        [InlineKeyboardButton(text="Back to normal UI", callback_data="nav:hub")]
+    )
     return "\n".join(lines), _kb(rows)
 
 
@@ -637,6 +680,8 @@ async def screen_quality(tg_id: int) -> tuple[str, InlineKeyboardMarkup]:
         "<b>Глобальные пороги</b>\n"
         f"Мин. профит: {fmt_price(config.MIN_PROFIT_RUB)}\n"
         f"Мин. маржа: {config.MIN_PROFIT_RATIO*100:.0f}%\n"
+        f"Мин. ROI: {config.MIN_ROI_RATIO*100:.0f}%\n"
+        f"Мин. качество: {config.MIN_DEAL_SCORE}/100\n"
         f"Оверхед на флип: {fmt_price(config.PROFIT_OVERHEAD_RUB)}"
     )
     rows = [

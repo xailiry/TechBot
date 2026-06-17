@@ -104,6 +104,22 @@ def test_detail_parse() -> None:
     check("detail_fetched", it.detail_fetched is True)
 
 
+def test_price_badges() -> None:
+    from techhunter.scraper.parser import _parse_avito_price_badge
+
+    check("заниженная цена -> below",
+          _parse_avito_price_badge("Заниженная цена. Независимая оценка Авито") == "below")
+    check("цена ниже рыночной -> below",
+          _parse_avito_price_badge("Цена ниже рыночной") == "below")
+    check("завышенная цена -> above",
+          _parse_avito_price_badge("Завышенная цена") == "above")
+    check("рыночная цена -> market",
+          _parse_avito_price_badge("Рыночная цена") == "market")
+    # The widget caption alone must NOT be read as a market verdict.
+    check("независимая оценка одна -> None",
+          _parse_avito_price_badge("Независимая оценка Авито") is None)
+
+
 def test_block_detect() -> None:
     check("blocked detect", is_block_page("<html>Доступ ограничен: проблема с IP"))
     check("captcha detect", is_block_page('<div data-marker="captcha">'))
@@ -147,6 +163,7 @@ def main() -> None:
     test_urls()
     test_search_parse()
     test_detail_parse()
+    test_price_badges()
     test_block_detect()
     asyncio.run(test_dedup())
     print("\nAll Stage 1 checks passed.")

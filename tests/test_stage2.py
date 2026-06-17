@@ -38,8 +38,15 @@ def test_specs() -> None:
     s2 = extract_specs("Samsung S23", "8/256 ГБ, акб под замену, разбит экран")
     check("ram 8", s2.ram_gb == 8)
     check("storage 256 (ram/rom)", s2.storage_gb == 256)
-    check("low battery -> defect", "battery_replaced" in s2.defects)
+    check("worn battery -> defect", "battery_worn" in s2.defects)
     check("screen_cracked", "screen_cracked" in s2.defects)
+
+    s3 = extract_specs(
+        "iPhone 13",
+        "Аккумулятор заменили на новый, сейчас всё работает.",
+    )
+    check("replaced battery is explicit", "battery_replaced" in s3.defects)
+    check("replaced battery is not worn", "battery_worn" not in s3.defects)
 
     s3 = extract_specs("iPhone 12", "залочен на icloud, копия 1:1")
     check("icloud_locked", "icloud_locked" in s3.defects)
@@ -326,7 +333,7 @@ async def test_evaluate_textonly() -> None:
         description="8/256 ГБ, акб 70%, разбит экран",
     )
     r_low_bat = await evaluate_listing(item_low_bat, run_clip=False, do_dedup=False)
-    check("low battery -> defect in evaluate_listing", "battery_replaced" in r_low_bat.defects)
+    check("low battery -> defect in evaluate_listing", "battery_worn" in r_low_bat.defects)
 
 
 async def test_dedup_db() -> None:

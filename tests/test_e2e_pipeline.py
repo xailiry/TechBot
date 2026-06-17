@@ -61,7 +61,7 @@ async def _main() -> None:
     check("e2e price parsed", it0.price == 63000)
     check("e2e model normalized", rep0.model == "iPhone 13 Pro [RST]")
     check("e2e battery from title", rep0.battery_health == 92)
-    check("e2e working profit", val0.net_profit == 19000
+    check("e2e working profit", val0.net_profit == 13080
           and val0.opportunity is True)
     check("e2e card has title", "iPhone 13 Pro" in txt0)
     check("e2e card has profit line", "Профит" in txt0)

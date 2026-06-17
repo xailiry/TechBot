@@ -1,10 +1,11 @@
 import asyncio
 import contextlib
 import logging
+import random
 import time
 from datetime import datetime, timezone
 
-from .. import config, runtime
+from .. import config, runtime, settings_store
 from ..notifier import Notifier
 from ..db.repository import RepositoryContainer
 from ..ai.evaluate import EvaluationReport, evaluate_listing
@@ -74,6 +75,8 @@ class AvitoPoller:
         self._onboard_inprogress: set[int] = set()
         self._onboard_tasks: set[asyncio.Task] = set()
         self._onboard_lock = asyncio.Lock()
+        self._careful_discovery_active = False
+        self._careful_discovery_next_at = 0.0
 
     async def _onboard(self, sub, announce: bool) -> None:
         async with self._onboard_lock:
@@ -141,7 +144,17 @@ class AvitoPoller:
             with contextlib.suppress(Exception):
                 await self.notifier.onboarding_finished(sub.tg_id, sub.query, summary)
 
-    async def _evaluate(self, item, sem, cycle_eval, counters, mode: str = "fast", is_discovery: bool = False, deep_budget: dict | None = None):
+    async def _evaluate(
+        self,
+        item,
+        sem,
+        cycle_eval,
+        counters,
+        mode: str = "fast",
+        is_discovery: bool = False,
+        deep_budget: dict | None = None,
+        detail_delay: tuple[float, float] | None = None,
+    ):
         if item.id in cycle_eval:
             return cycle_eval[item.id]
 
@@ -161,9 +174,10 @@ class AvitoPoller:
             orig_id = await self.repos.listings.check_content_duplicate(item)
             if orig_id:
                 crow = await self.repos.listings.get_cached_listing(orig_id)
-                res = _apply_cache(crow)
-                if res:
-                    return res
+                if crow and crow["price"] == (item.price or None):
+                    res = _apply_cache(crow)
+                    if res:
+                        return res
 
             crow = await self.repos.listings.get_cached_listing(item.id)
             if crow and crow["price"] == (item.price or None):
@@ -190,6 +204,8 @@ class AvitoPoller:
                         return None, None
                     deep_budget["n"] -= 1
 
+                if detail_delay is not None:
+                    await asyncio.sleep(random.uniform(*detail_delay))
                 report, valuation = await process_new_listing(self.browser, item, mode=mode)
             except Exception as e:
                 counters["errors"] += 1
@@ -204,7 +220,18 @@ class AvitoPoller:
             cycle_eval[item.id] = (report, valuation)
             return report, valuation
 
-    async def _handle_items(self, items, target, sem, cycle_eval, counters, runtime_drop, mode: str = "fast", deep_budget: dict | None = None):
+    async def _handle_items(
+        self,
+        items,
+        target,
+        sem,
+        cycle_eval,
+        counters,
+        runtime_drop,
+        mode: str = "fast",
+        deep_budget: dict | None = None,
+        detail_delay: tuple[float, float] | None = None,
+    ):
         is_sub = hasattr(target, "query")
         is_discovery = not is_sub
         tg_id = target.tg_id
@@ -213,10 +240,21 @@ class AvitoPoller:
         # Per-target feedback state is fetched once per cycle, not per item.
         feedback_mult = await feedback_threshold_multiplier(tg_id)
         reason_stats = await self.repos.feedback.feedback_reason_stats(tg_id)
+        # Channel mirror toggle (shared in-process cache), read once per cycle.
+        channel_on = settings_store.channel_enabled()
 
         async def _handle_one(it):
             try:
-                report, valuation = await self._evaluate(it, sem, cycle_eval, counters, mode=mode, is_discovery=is_discovery, deep_budget=deep_budget)
+                report, valuation = await self._evaluate(
+                    it,
+                    sem,
+                    cycle_eval,
+                    counters,
+                    mode=mode,
+                    is_discovery=is_discovery,
+                    deep_budget=deep_budget,
+                    detail_delay=detail_delay,
+                )
                 if valuation is None or not valuation.opportunity:
                     return
 
@@ -232,6 +270,18 @@ class AvitoPoller:
                     if valuation.net_profit < min_rub or (valuation.profit_pct or 0.0) < min_ratio:
                         counters["filtered"] += 1
                         runtime_drop["discovery_threshold"] = runtime_drop.get("discovery_threshold", 0) + 1
+                        return
+                    if (valuation.roi_pct or 0.0) < config.DISCOVERY_MIN_ROI_RATIO:
+                        counters["filtered"] += 1
+                        runtime_drop["discovery_roi"] = (
+                            runtime_drop.get("discovery_roi", 0) + 1
+                        )
+                        return
+                    if valuation.deal_score < config.DISCOVERY_MIN_DEAL_SCORE:
+                        counters["filtered"] += 1
+                        runtime_drop["discovery_quality"] = (
+                            runtime_drop.get("discovery_quality", 0) + 1
+                        )
                         return
 
                 if feedback_mult != 1.0:
@@ -255,7 +305,15 @@ class AvitoPoller:
                     runtime_drop[reason] = runtime_drop.get(reason, 0) + 1
                     return
 
-                if await self.repos.alerts.alert_already_sent(tg_id, it.id):
+                # Content-repost guard and delivery filters are shared gates:
+                # a lot that must not be delivered is not mirrored either.
+                if await self.repos.alerts.content_alert_already_sent(
+                    tg_id, it.get_content_hash(), it.price or None
+                ):
+                    counters["filtered"] += 1
+                    runtime_drop["duplicate_repost"] = (
+                        runtime_drop.get("duplicate_repost", 0) + 1
+                    )
                     return
 
                 ok, reason = passes_filters(prefs, it, report, valuation)
@@ -264,27 +322,79 @@ class AvitoPoller:
                     runtime_drop[reason] = runtime_drop.get(reason, 0) + 1
                     return
 
-                try:
-                    await self.notifier.deal(it, report, valuation, tg_id=tg_id, sub_query=sub_query)
-                except Exception as e:
-                    counters["errors"] += 1
-                    with contextlib.suppress(Exception):
-                        await self.repos.alerts.queue_pending_alert(tg_id, it, report, valuation, sub_query=sub_query, error=str(e))
-                        counters["queued"] += 1
-                    return
+                # Personal delivery: skip only the personal send if it already
+                # went out, but never block the channel mirror below (otherwise
+                # a network blip on the channel post is lost forever).
+                if not await self.repos.alerts.alert_already_sent(tg_id, it.id):
+                    try:
+                        await self.notifier.deal(it, report, valuation, tg_id=tg_id, sub_query=sub_query)
+                    except Exception as e:
+                        counters["errors"] += 1
+                        with contextlib.suppress(Exception):
+                            await self.repos.alerts.queue_pending_alert(tg_id, it, report, valuation, sub_query=sub_query, error=str(e))
+                            counters["queued"] += 1
+                    else:
+                        counters["deals"] += 1
+                        with contextlib.suppress(Exception):
+                            await self.repos.alerts.mark_alert_sent(
+                                tg_id, it.id, content_hash=it.get_content_hash(),
+                                price=it.price, profit=valuation.net_profit,
+                                verdict=valuation.scam_verdict, condition=valuation.condition,
+                                sub_query=sub_query,
+                            )
 
-                counters["deals"] += 1
-                with contextlib.suppress(Exception):
-                    await self.repos.alerts.mark_alert_sent(
-                        tg_id, it.id, price=it.price, profit=valuation.net_profit,
-                        verdict=valuation.scam_verdict, condition=valuation.condition,
-                        sub_query=sub_query,
-                    )
+                # Mirror deals (subscriptions and Discovery) to the public demo
+                # channel when enabled, independent of the personal delivery
+                # state (own dedup key + own outbox).
+                if channel_on:
+                    await self._mirror_to_channel(it, report, valuation, sub_query)
             except Exception as e:
                 counters["errors"] += 1
                 log.warning("Item handling failed for %s: %s", getattr(it, "id", "?"), e)
 
         await asyncio.gather(*(_handle_one(it) for it in items), return_exceptions=True)
+
+    async def _mirror_to_channel(self, it, report, valuation, sub_query) -> None:
+        """Mirror a Discovery deal to the public demo channel exactly once.
+
+        Independent of personal delivery: own dedup key and, on failure, its
+        own outbox row (sub_query="channel") so a Telegram network blip on the
+        channel POST is retried instead of lost forever.
+        """
+        if config.DEMO_CHANNEL_ID is None:
+            return
+        ch_key = (
+            config.DEMO_CHANNEL_ID
+            if isinstance(config.DEMO_CHANNEL_ID, int)
+            else config.CHANNEL_DEDUP_FALLBACK_ID
+        )
+        try:
+            if await self.repos.alerts.alert_already_sent(ch_key, it.id):
+                return
+            await self.notifier.deal_to_channel(
+                it, report, valuation, sub_query=sub_query
+            )
+        except Exception as e:
+            with contextlib.suppress(Exception):
+                await self.repos.alerts.queue_pending_alert(
+                    ch_key, it, report, valuation,
+                    sub_query="channel", error=str(e),
+                )
+            log.warning(
+                "Channel post FAILED for %s (channel=%s), queued for retry: %s",
+                getattr(it, "id", "?"), config.DEMO_CHANNEL_ID, e,
+            )
+            return
+        with contextlib.suppress(Exception):
+            await self.repos.alerts.mark_alert_sent(
+                ch_key, it.id,
+                content_hash=it.get_content_hash(),
+                price=it.price, profit=valuation.net_profit,
+                verdict=valuation.scam_verdict,
+                condition=valuation.condition,
+                sub_query="channel",
+            )
+        log.info("Channel post OK for %s -> %s", it.id, config.DEMO_CHANNEL_ID)
 
     async def poll_fast(self) -> None:
         if self.browser.session.is_paused:
@@ -298,14 +408,40 @@ class AvitoPoller:
         subs = await self.repos.subscriptions.active_subscriptions()
         d_users = await self.repos.users.discovery_users()
         if not subs and not d_users:
+            self._careful_discovery_active = False
+            self._careful_discovery_next_at = 0.0
             runtime.update_cycle(mode="fast", status="idle", subs=0, scraped=0, processed=0, cached=0, errors=0, deals=0, filtered=0, drop_reasons={})
             _log_cycle("fast", "idle", subs=0, counters=_new_counters(), drop_reasons={})
             return
 
+        fast_d_users = [
+            u for u in d_users
+            if getattr(u, "discovery_scan_mode", "fast") != "careful"
+        ]
+        careful_d_users = [
+            u for u in d_users
+            if getattr(u, "discovery_scan_mode", "fast") == "careful"
+        ]
+        careful_active = bool(careful_d_users)
+        if careful_active and not self._careful_discovery_active:
+            self._careful_discovery_next_at = 0.0
+        self._careful_discovery_active = careful_active
+
+        now = time.monotonic()
+        careful_due = careful_active and now >= self._careful_discovery_next_at
+        if careful_due:
+            interval_min = max(1, config.DISCOVERY_CAREFUL_INTERVAL_MIN_SEC)
+            interval_max = max(interval_min, config.DISCOVERY_CAREFUL_INTERVAL_MAX_SEC)
+            self._careful_discovery_next_at = now + random.uniform(
+                interval_min, interval_max
+            )
+
         counters = _new_counters()
         cycle_eval = {}
         runtime_drop = {}
-        eval_sem = asyncio.Semaphore(config.FAST_WORKERS)
+        careful_only = careful_due and not fast_d_users
+        eval_sem = asyncio.Semaphore(1 if careful_only else config.FAST_WORKERS)
+        cycle_status = "success"
 
         if d_users:
             if self._onboard_tasks:
@@ -315,6 +451,7 @@ class AvitoPoller:
                 self._onboard_tasks.clear()
                 self._onboard_inprogress.clear()
         else:
+            scan_plans: dict[tuple, list] = {}
             for sub in subs:
                 if sub.id not in self._onboard_inprogress:
                     if sub.onboarded_at is None or (config.ONBOARDING_REFRESH_SEC > 0 and _age_sec(sub.onboarded_at) >= config.ONBOARDING_REFRESH_SEC):
@@ -323,37 +460,118 @@ class AvitoPoller:
                         self._onboard_tasks.add(t)
                         t.add_done_callback(self._onboard_tasks.discard)
                         t.add_done_callback(lambda _t, sid=sub.id: self._onboard_inprogress.discard(sid))
-                
+
+                pages = max(1, sub.search_pages or config.FAST_SCAN_PAGES)
+                key = (
+                    sub.query,
+                    sub.city_slug,
+                    sub.min_price,
+                    sub.max_price,
+                    pages,
+                )
+                scan_plans.setdefault(key, []).append(sub)
+
+            search_sem = asyncio.Semaphore(max(1, config.FAST_WORKERS))
+
+            async def _search_plan(key, targets):
+                query, city_slug, min_price, max_price, pages = key
                 try:
-                    pages = max(1, sub.search_pages or config.FAST_SCAN_PAGES)
-                    items = await self.browser.search(sub.query, sub.city_slug, min_price=sub.min_price, max_price=sub.max_price, pages=pages, mode="fast")
-                    counters["scraped"] += len(items)
-                    await self._handle_items(items, sub, eval_sem, cycle_eval, counters, runtime_drop, mode="fast")
+                    async with search_sem:
+                        items = await self.browser.search(
+                            query,
+                            city_slug,
+                            min_price=min_price,
+                            max_price=max_price,
+                            pages=pages,
+                            mode="fast",
+                        )
+                    return targets, items, None
                 except Exception as e:
-                    log.warning("Fast search failed sub %s: %s", sub.id, e)
+                    return targets, [], e
+
+            results = await asyncio.gather(
+                *(_search_plan(key, targets) for key, targets in scan_plans.items())
+            )
+            for targets, items, error in results:
+                if error is not None:
+                    counters["errors"] += 1
+                    ids = ",".join(str(sub.id) for sub in targets)
+                    log.warning("Fast search failed subs %s: %s", ids, error)
+                    continue
+                counters["scraped"] += len(items)
+                for sub in targets:
+                    await self._handle_items(items, sub, eval_sem, cycle_eval, counters, runtime_drop, mode="fast")
 
         if d_users:
-            deep_budget = {"n": config.DISCOVERY_DEEP_PER_CYCLE}
-            try:
-                items = await self.browser.search(query="", city_slug=config.DISCOVERY_CITY_SLUG, min_price=config.DISCOVERY_MIN_PRICE, pages=config.FAST_SCAN_PAGES, mode="fast")
-                counters["scraped"] += len(items)
-                for u in d_users:
-                    await self._handle_items(items, u, eval_sem, cycle_eval, counters, runtime_drop, mode="fast", deep_budget=deep_budget)
-            except Exception as e:
-                log.warning("Fast discovery failed: %s", e)
+            recipients = list(fast_d_users)
+            if careful_due:
+                recipients.extend(careful_d_users)
+
+            if not recipients:
+                cycle_status = "careful_wait"
+            else:
+                careful_profile = not fast_d_users
+                pages = (
+                    max(1, config.DISCOVERY_CAREFUL_PAGES)
+                    if careful_profile
+                    else config.FAST_SCAN_PAGES
+                )
+                deep_budget = {
+                    "n": (
+                        config.DISCOVERY_CAREFUL_DEEP_PER_CYCLE
+                        if careful_profile
+                        else config.DISCOVERY_DEEP_PER_CYCLE
+                    )
+                }
+                detail_delay = (
+                    config.DISCOVERY_CAREFUL_DETAIL_DELAY_SEC
+                    if careful_profile
+                    else None
+                )
+                settle_delay = (
+                    config.DISCOVERY_CAREFUL_SETTLE_DELAY_SEC
+                    if careful_profile
+                    else None
+                )
+                try:
+                    items = await self.browser.search(
+                        query="",
+                        city_slug=config.DISCOVERY_CITY_SLUG,
+                        min_price=config.DISCOVERY_MIN_PRICE,
+                        pages=pages,
+                        mode="fast",
+                        settle_delay=settle_delay,
+                    )
+                    counters["scraped"] += len(items)
+                    for u in recipients:
+                        await self._handle_items(
+                            items,
+                            u,
+                            eval_sem,
+                            cycle_eval,
+                            counters,
+                            runtime_drop,
+                            mode="fast",
+                            deep_budget=deep_budget,
+                            detail_delay=detail_delay,
+                        )
+                except Exception as e:
+                    counters["errors"] += 1
+                    cycle_status = "error"
+                    log.warning("Fast discovery failed: %s", e)
 
         # "subs" counts active scan targets (subscriptions + discovery
         # users) so the watchdog dry alert also works in pure Discovery mode.
         targets = len(subs) + len(d_users)
         runtime.update_cycle(
-            mode="fast", status="success",
+            mode="fast", status=cycle_status,
             subs=targets, scraped=counters["scraped"], processed=counters["processed"],
             cached=counters["cached"], errors=counters["errors"], deals=counters["deals"],
             filtered=counters["filtered"], drop_reasons=runtime_drop,
         )
         _log_cycle(
             "fast",
-            "success",
+            cycle_status,
             subs=targets,
             counters=counters,
             drop_reasons=runtime_drop,
@@ -368,10 +586,15 @@ class AvitoPoller:
             runtime.update_cycle(mode="deep", status="training", subs=0, scraped=0, processed=0, cached=0, errors=0, deals=0, filtered=0, drop_reasons={})
             return
 
-        d_users = await self.repos.users.discovery_users()
+        all_d_users = await self.repos.users.discovery_users()
+        d_users = [
+            u for u in all_d_users
+            if getattr(u, "discovery_scan_mode", "fast") != "careful"
+        ]
         if not d_users:
-            runtime.update_cycle(mode="deep", status="idle", subs=0, scraped=0, processed=0, cached=0, errors=0, deals=0, filtered=0, drop_reasons={})
-            _log_cycle("deep", "idle", subs=0, counters=_new_counters(), drop_reasons={})
+            status = "careful_off" if all_d_users else "idle"
+            runtime.update_cycle(mode="deep", status=status, subs=0, scraped=0, processed=0, cached=0, errors=0, deals=0, filtered=0, drop_reasons={})
+            _log_cycle("deep", status, subs=0, counters=_new_counters(), drop_reasons={})
             return
 
         start_page = config.FAST_SCAN_PAGES + 1

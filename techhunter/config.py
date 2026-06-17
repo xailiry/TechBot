@@ -17,6 +17,33 @@ ADMIN_USER_IDS = {
     int(x) for x in os.getenv("ADMIN_USER_IDS", "").split(",") if x.strip().isdigit()
 }
 
+
+def _parse_chat_id(raw: str):
+    """Accept a numeric channel id (-100…) or an @username. Numeric is
+    preferred: it is stable and used as the dedup key across restarts."""
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    if raw.startswith("@"):
+        return raw
+    try:
+        return int(raw)
+    except ValueError:
+        return raw
+
+
+# ─── Demo / showcase channel ────────────────────────────────────────────────
+# Optional Telegram channel where the bot mirrors deals (subscriptions and
+# Discovery) in real time as a public live demo. Set DEMO_CHANNEL_ID to the
+# channel's numeric id (e.g. -1001234567890; preferred) or @username. The bot
+# must be an admin of the channel with the "Post messages" right. Empty =
+# feature off. The live on/off toggle is in the bot (/channel or the Dev
+# panel); this env var only enables the feature and sets the channel.
+DEMO_CHANNEL_ID = _parse_chat_id(os.getenv("DEMO_CHANNEL_ID", ""))
+# Stable dedup key used in sent_alerts when DEMO_CHANNEL_ID is an @username
+# (no stable int). Negative so it can never collide with a real Telegram id.
+CHANNEL_DEDUP_FALLBACK_ID = -1
+
 # Database. App uses the async driver; Alembic uses the sync one (same file).
 DB_PATH = os.getenv("DB_PATH", str(DATA_DIR / "techhunter.db"))
 DB_URL = os.getenv("DB_URL", f"sqlite+aiosqlite:///{DB_PATH}")
@@ -127,6 +154,14 @@ DELIVERY_RETRY_INTERVAL_SEC = int(os.getenv("DELIVERY_RETRY_INTERVAL_SEC", "60")
 DELIVERY_RETRY_BATCH_SIZE = int(os.getenv("DELIVERY_RETRY_BATCH_SIZE", "8"))
 PENDING_ALERT_MAX_RETRIES = int(os.getenv("PENDING_ALERT_MAX_RETRIES", "6"))
 PENDING_ALERT_RETENTION_DAYS = int(os.getenv("PENDING_ALERT_RETENTION_DAYS", "2"))
+# A repost of the same phone is only interesting again after a meaningful
+# price drop. Smaller changes are treated as duplicate noise.
+REPOST_MIN_PRICE_DROP_RUB = int(
+    os.getenv("REPOST_MIN_PRICE_DROP_RUB", "1000")
+)
+REPOST_MIN_PRICE_DROP_RATIO = float(
+    os.getenv("REPOST_MIN_PRICE_DROP_RATIO", "0.03")
+)
 
 # ─── AI evaluation (Stage 2, local only) ────────────────────────────────────
 # Battery health at/under this % counts as a condition defect.
@@ -150,14 +185,33 @@ CARD_STATE_RETENTION_DAYS = int(os.getenv("CARD_STATE_RETENTION_DAYS", "7"))
 SENT_ALERT_RETENTION_DAYS = int(os.getenv("SENT_ALERT_RETENTION_DAYS", "30"))
 
 # ─── Valuation (Stage 3) ────────────────────────────────────────────────────
-# Reseller overhead per flip (cleaning, shipping, fees) in RUB. Real number;
-# defaults to 0 so we never inflate profit with a made-up cost.
-PROFIT_OVERHEAD_RUB = int(os.getenv("PROFIT_OVERHEAD_RUB", "0"))
+# Reseller overhead per flip (diagnostics, travel/shipping, cleaning, fees).
+# Zero makes every deal look better than it really is, so the default keeps a
+# small real-world reserve and remains operator-configurable.
+PROFIT_OVERHEAD_RUB = int(os.getenv("PROFIT_OVERHEAD_RUB", "1000"))
 # Average discount expected during haggling (e.g. 0.05 = 5% off market).
 PROFIT_HAGGLE_PERCENT = float(os.getenv("PROFIT_HAGGLE_PERCENT", "0.05"))
+# Extra resale-price reserve by baseline confidence. net_profit uses this
+# conservative price; expected_profit keeps the ordinary haggle estimate.
+PROFIT_SAFETY_BUFFER_HIGH = float(
+    os.getenv("PROFIT_SAFETY_BUFFER_HIGH", "0.03")
+)
+PROFIT_SAFETY_BUFFER_MEDIUM = float(
+    os.getenv("PROFIT_SAFETY_BUFFER_MEDIUM", "0.06")
+)
+PROFIT_SAFETY_BUFFER_LOW = float(
+    os.getenv("PROFIT_SAFETY_BUFFER_LOW", "0.10")
+)
+# Built-in repair prices are estimates, so reserve extra cash for variance.
+REPAIR_ESTIMATE_BUFFER_RATIO = float(
+    os.getenv("REPAIR_ESTIMATE_BUFFER_RATIO", "0.20")
+)
 # A lot is surfaced as a deal only above both thresholds.
 MIN_PROFIT_RUB = int(os.getenv("MIN_PROFIT_RUB", "3000"))
 MIN_PROFIT_RATIO = float(os.getenv("MIN_PROFIT_RATIO", "0.12"))
+# ROI is net profit divided by all cash committed to the flip.
+MIN_ROI_RATIO = float(os.getenv("MIN_ROI_RATIO", "0.12"))
+MIN_DEAL_SCORE = int(os.getenv("MIN_DEAL_SCORE", "50"))
 
 # ─── Fast Valuation (Stage 1 / Speed) ───────────────────────────────────────
 # If item.price < (market * (1 - HAGGLE) * threshold), trigger Stage 2.
@@ -180,6 +234,14 @@ AVITO_MARKET_BADGE_CONFLICT_RATIO = float(
 # Polling the whole category for any deal that matches these thresholds.
 DISCOVERY_MIN_PROFIT_RUB = int(os.getenv("DISCOVERY_MIN_PROFIT_RUB", "7000"))
 DISCOVERY_MIN_PROFIT_RATIO = float(os.getenv("DISCOVERY_MIN_PROFIT_RATIO", "0.20"))
+# Discovery is broad and noisy, so it also has hard quality floors even when
+# a user deliberately lowers the visible profit/margin controls.
+DISCOVERY_MIN_ROI_RATIO = float(
+    os.getenv("DISCOVERY_MIN_ROI_RATIO", "0.20")
+)
+DISCOVERY_MIN_DEAL_SCORE = int(
+    os.getenv("DISCOVERY_MIN_DEAL_SCORE", "65")
+)
 DISCOVERY_CITY_SLUG = os.getenv("DISCOVERY_CITY_SLUG", "rossiya")
 # Junk floor: the category scan ignores everything below this price, which
 # cheaply drops "старое говно" (ancient/worthless phones). No-name Chinese
@@ -191,6 +253,26 @@ DISCOVERY_MIN_PRICE = int(os.getenv("DISCOVERY_MIN_PRICE", "5000"))
 # This caps such deep evaluations per scan cycle so a mispriced baseline
 # cannot trigger a flood of detail fetches (captcha/IP-ban protection).
 DISCOVERY_DEEP_PER_CYCLE = int(os.getenv("DISCOVERY_DEEP_PER_CYCLE", "15"))
+# Autonomous low-pressure profile. It checks only the newest page every few
+# minutes, opens very few detail pages, and disables the page 4+ crawl.
+DISCOVERY_CAREFUL_INTERVAL_MIN_SEC = int(
+    os.getenv("DISCOVERY_CAREFUL_INTERVAL_MIN_SEC", "180")
+)
+DISCOVERY_CAREFUL_INTERVAL_MAX_SEC = int(
+    os.getenv("DISCOVERY_CAREFUL_INTERVAL_MAX_SEC", "300")
+)
+DISCOVERY_CAREFUL_PAGES = int(os.getenv("DISCOVERY_CAREFUL_PAGES", "1"))
+DISCOVERY_CAREFUL_DEEP_PER_CYCLE = int(
+    os.getenv("DISCOVERY_CAREFUL_DEEP_PER_CYCLE", "3")
+)
+DISCOVERY_CAREFUL_DETAIL_DELAY_SEC = (
+    float(os.getenv("DISCOVERY_CAREFUL_DETAIL_DELAY_MIN_SEC", "4.0")),
+    float(os.getenv("DISCOVERY_CAREFUL_DETAIL_DELAY_MAX_SEC", "9.0")),
+)
+DISCOVERY_CAREFUL_SETTLE_DELAY_SEC = (
+    float(os.getenv("DISCOVERY_CAREFUL_SETTLE_DELAY_MIN_SEC", "1.5")),
+    float(os.getenv("DISCOVERY_CAREFUL_SETTLE_DELAY_MAX_SEC", "3.0")),
+)
 
 # Broad market-learning crawl. Card learning is cheap, but some cards are too
 # weak/noisy (missing storage or fresh Apple models), so training may open a
@@ -210,8 +292,13 @@ BASELINE_MIN_SAMPLE_COND = int(os.getenv("BASELINE_MIN_SAMPLE_COND", "12"))
 CONF_HIGH_SAMPLE = int(os.getenv("CONF_HIGH_SAMPLE", "25"))
 CONF_MED_SAMPLE = int(os.getenv("CONF_MED_SAMPLE", "12"))
 CONF_FRESH_DAYS = int(os.getenv("CONF_FRESH_DAYS", "3"))
-BASELINE_LOOKBACK_DAYS = int(os.getenv("BASELINE_LOOKBACK_DAYS", "120"))
+BASELINE_LOOKBACK_DAYS = int(os.getenv("BASELINE_LOOKBACK_DAYS", "60"))
 BASELINE_MAX_SAMPLE = int(os.getenv("BASELINE_MAX_SAMPLE", "600"))
+# A shop can repost many lots at one template price. Cap identical price
+# points so one seller pattern cannot pull the market median upward.
+BASELINE_IDENTICAL_PRICE_CAP = max(
+    1, int(os.getenv("BASELINE_IDENTICAL_PRICE_CAP", "3"))
+)
 # Prune observations older than this. MUST stay >= lookback so learning
 # is unaffected; only truly dead data is removed.
 PRICE_OBS_RETENTION_DAYS = int(

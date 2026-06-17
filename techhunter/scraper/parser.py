@@ -17,12 +17,18 @@ _REVIEWS_RE = re.compile(r"(\d+)\s*отзыв", re.I)
 _LISTINGS_RE = re.compile(r"(\d+)\s*объявлен", re.I)
 _YEAR_RE = re.compile(r"с\s*(\d{4})\s*года", re.I)
 _RATING_RE = re.compile(r"\b([1-5][.,]\d)\b")
-_AVITO_MARKET_BADGE_RE = re.compile(
-    r"рыночная\s+цена|независимая\s+оценка\s+авито",
-    re.I,
+# Avito's price-assessment verdicts. "Независимая оценка Авито" is only the
+# widget's caption shown under ANY verdict, so it must NOT be read as a
+# "market" signal on its own - that mislabels "Заниженная цена" / "Завышенная
+# цена" lots as market-priced (loses the below/above signal, pollutes the
+# learned baseline, and falsely triggers the market-badge conflict).
+_AVITO_PRICE_BELOW_RE = re.compile(
+    r"заниженн\w*\s+цена|цена\s+ниже\s+рыночн", re.I
 )
-_AVITO_PRICE_BELOW_RE = re.compile(r"цена\s+ниже\s+рыночн", re.I)
-_AVITO_PRICE_ABOVE_RE = re.compile(r"цена\s+выше\s+рыночн", re.I)
+_AVITO_PRICE_ABOVE_RE = re.compile(
+    r"завышенн\w*\s+цена|цена\s+выше\s+рыночн", re.I
+)
+_AVITO_MARKET_BADGE_RE = re.compile(r"рыночная\s+цена", re.I)
 
 
 def _parse_avito_price_badge(text: str) -> str | None:

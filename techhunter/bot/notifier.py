@@ -61,6 +61,20 @@ class TelegramNotifier:
             self.bot, tg_id, item, report, valuation, sub_query or ""
         )
 
+    async def deal_to_channel(
+        self, item, report, valuation, *, sub_query=None
+    ) -> None:
+        """Mirror a Discovery deal to the public demo channel (link-only card,
+        no per-user feedback buttons). Raises on failure so the caller does not
+        mark it delivered and the listing can be retried."""
+        chat_id = config.DEMO_CHANNEL_ID
+        if chat_id is None:
+            return
+        await send_deal_card(
+            self.bot, chat_id, item, report, valuation,
+            sub_query or "", for_channel=True,
+        )
+
     async def onboarding_started(
         self, tg_id: int, query: str, eta_sec: int
     ) -> None:

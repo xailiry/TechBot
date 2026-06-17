@@ -28,6 +28,14 @@ class Notifier(Protocol):
         tg_id: int | None = None,
         sub_query: str | None = None,
     ) -> None: ...
+    async def deal_to_channel(
+        self,
+        item: ParsedListing,
+        report: EvaluationReport,
+        valuation: Valuation,
+        *,
+        sub_query: str | None = None,
+    ) -> None: ...
     async def onboarding_started(
         self, tg_id: int, query: str, eta_sec: int
     ) -> None: ...
@@ -94,6 +102,12 @@ class ConsoleNotifier:
             valuation.scam_verdict,
             item.full_url,
         )
+
+    async def deal_to_channel(
+        self, item, report, valuation, *, sub_query=None
+    ) -> None:
+        # No channel in console mode; the Telegram notifier implements this.
+        return
 
     async def onboarding_started(
         self, tg_id: int, query: str, eta_sec: int

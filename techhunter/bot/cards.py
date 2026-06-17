@@ -41,11 +41,25 @@ def build_action_kb(item) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def build_channel_kb(item) -> InlineKeyboardMarkup:
+    """Link-only keyboard for channel posts. Feedback / haggle callbacks are
+    per-user and do not work on a channel message, so they are omitted."""
+    rows = [
+        [InlineKeyboardButton(text="🔎 Открыть на Avito →", url=item.full_url)]
+    ]
+    if getattr(item, "chat_url", None):
+        rows.append(
+            [InlineKeyboardButton(text="✉️ Написать продавцу", url=item.chat_url)]
+        )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 async def send_deal_card(
-    bot: Bot, tg_id: int, item, report, valuation, sub_query: str = ""
+    bot: Bot, tg_id: int, item, report, valuation, sub_query: str = "",
+    *, for_channel: bool = False,
 ) -> None:
     text = format_deal_card(item, report, valuation, sub_query)
-    kb = build_action_kb(item)
+    kb = build_channel_kb(item) if for_channel else build_action_kb(item)
 
     photo = None
     img_url = item.image or (item.images[0] if item.images else None)
@@ -76,7 +90,7 @@ async def send_deal_card(
         log.warning("send_deal_card failed for %s: %s", tg_id, e)
         raise
 
-    if msg is not None:
+    if msg is not None and not for_channel:
         try:
             await save_card_state(
                 tg_id,

@@ -8,6 +8,7 @@ accumulate and the more accurate the medians become. Per condition tier
 import logging
 import asyncio
 import time
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import delete, func, or_, select
@@ -169,12 +170,26 @@ async def _prices(device_id: int, conditions, session: AsyncSession | None = Non
         .order_by(PriceObservation.observed_at.desc())
         .limit(config.BASELINE_MAX_SAMPLE)
     )
+
+    def _capped(rows) -> list[int]:
+        counts: Counter[int] = Counter()
+        raw_prices = [int(row[0]) for row in rows]
+        prices: list[int] = []
+        for price in raw_prices:
+            if counts[price] >= config.BASELINE_IDENTICAL_PRICE_CAP:
+                continue
+            counts[price] += 1
+            prices.append(price)
+        # Do not destroy an otherwise sufficient homogeneous sample. The cap
+        # is applied only when enough independent price levels remain.
+        return prices if len(prices) >= config.BASELINE_MIN_SAMPLE else raw_prices
+
     if session is not None:
         rows = await session.execute(stmt)
-        return [r[0] for r in rows.all()]
+        return _capped(rows.all())
     async with get_session() as s:
         rows = await s.execute(stmt)
-        return [r[0] for r in rows.all()]
+        return _capped(rows.all())
 
 
 async def _upsert_baseline(

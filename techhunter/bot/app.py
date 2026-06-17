@@ -30,6 +30,7 @@ from ..storage import (
     set_min_score,
     set_paused,
     toggle_exclude_condition,
+    toggle_subscription_paused,
     upsert_user,
 )
 from .cards import haggle_text
@@ -205,6 +206,28 @@ async def cmd_retry_pending(msg: Message) -> None:
 
     sent = await _retry_pending_alerts(TelegramNotifier(msg.bot))
     await msg.answer(f"🔁 Outbox retry: отправлено {sent}.")
+
+
+@dp.message(Command("channel"), AdminFilter())
+async def cmd_channel(msg: Message) -> None:
+    from .. import settings_store
+
+    if config.DEMO_CHANNEL_ID is None:
+        await msg.answer("Канал не настроен: задай DEMO_CHANNEL_ID в .env.")
+        return
+    args = (msg.text or "").split()
+    arg = args[1].lower() if len(args) > 1 else ""
+    if arg in ("on", "вкл", "1"):
+        settings_store.set_channel_enabled(True)
+    elif arg in ("off", "выкл", "0"):
+        settings_store.set_channel_enabled(False)
+    elif arg:
+        await msg.answer("Использование: <code>/channel on</code> или <code>/channel off</code>", parse_mode="HTML")
+        return
+    else:
+        settings_store.set_channel_enabled(not settings_store.channel_enabled())
+    state = "ВКЛ" if settings_store.channel_enabled() else "ВЫКЛ"
+    await msg.answer(f"📡 Постинг сделок в канал: <b>{state}</b>", parse_mode="HTML")
 
 
 @dp.message(Command("allow"), AdminFilter())
@@ -464,6 +487,17 @@ async def cb_sub_del(cb: CallbackQuery) -> None:
     await _edit(cb, await screen_subs(cb.from_user.id, int(page)))
 
 
+@dp.callback_query(F.data.startswith("sub:pause:"))
+async def cb_sub_pause(cb: CallbackQuery) -> None:
+    _, _, sid, page = cb.data.split(":")
+    new_state = await toggle_subscription_paused(cb.from_user.id, int(sid))
+    if new_state is None:
+        await _answer_cb(cb, "Не найдено")
+    else:
+        await _answer_cb(cb, "Подписка на паузе" if new_state else "Поиск возобновлён")
+    await _edit(cb, await screen_subs(cb.from_user.id, int(page)))
+
+
 @dp.callback_query(F.data.startswith("set:"))
 async def cb_settings(cb: CallbackQuery) -> None:
     await _answer_cb(cb)
@@ -496,6 +530,7 @@ async def cb_discovery(cb: CallbackQuery) -> None:
         get_session,
         set_discovery_enabled,
         set_discovery_profit,
+        set_discovery_scan_mode,
     )
 
     await upsert_user(cb.from_user.id, cb.from_user.username)
@@ -530,6 +565,11 @@ async def cb_discovery(cb: CallbackQuery) -> None:
         )
         await set_discovery_profit(tg, rub=rub, ratio=ratio)
         await _answer_cb(cb, f"Discovery: {label}")
+    elif action == "mode":
+        mode = parts[2] if len(parts) > 2 else "fast"
+        await set_discovery_scan_mode(tg, mode)
+        label = "Быстрый" if mode == "fast" else "Аккуратный"
+        await _answer_cb(cb, f"Темп Discovery: {label}")
     else:
         await _answer_cb(cb)
         return
@@ -539,6 +579,19 @@ async def cb_discovery(cb: CallbackQuery) -> None:
 @dp.callback_query(F.data == "dev:raw", AdminFilter())
 async def cb_dev_raw(cb: CallbackQuery) -> None:
     await _edit(cb, await screen_dev(raw=True))
+
+
+@dp.callback_query(F.data == "dev:channel", AdminFilter())
+async def cb_dev_channel(cb: CallbackQuery) -> None:
+    from .. import settings_store
+
+    if config.DEMO_CHANNEL_ID is None:
+        await _answer_cb(cb, "Канал не настроен (DEMO_CHANNEL_ID пуст)", show_alert=True)
+        return
+    new_state = not settings_store.channel_enabled()
+    settings_store.set_channel_enabled(new_state)
+    await _answer_cb(cb, "Постинг в канал включён" if new_state else "Постинг в канал выключен")
+    await _edit(cb, await screen_dev())
 
 
 @dp.callback_query(F.data.startswith("dev:confirm:"), AdminFilter())

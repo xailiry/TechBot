@@ -18,7 +18,7 @@ REPAIRABLE: dict[str, str] = {
     "screen_cracked": "screen",
     "screen_display_defect": "screen",
     "back_glass_cracked": "back_glass",
-    "battery_replaced": "battery",
+    "battery_worn": "battery",
     "faceid_broken": "faceid",
     "no_power": "no_power",
 }

@@ -35,11 +35,51 @@ class MaintenanceTasks:
         for row in rows:
             tg_id = row["tg_id"]
             listing_id = row["listing_id"]
+
+            # Channel mirror rows are delivered via deal_to_channel and have
+            # no per-user access concept; handle them on their own path.
+            if row.get("sub_query") == "channel":
+                if config.DEMO_CHANNEL_ID is None or await self.repos.alerts.alert_already_sent(tg_id, listing_id):
+                    await self.repos.alerts.mark_pending_sent(tg_id, listing_id)
+                    continue
+                try:
+                    item = ParsedListing(**row["item"])
+                    report = EvaluationReport(**row["report"])
+                    valuation = Valuation(**row["valuation"])
+                    await self.notifier.deal_to_channel(
+                        item, report, valuation, sub_query="channel"
+                    )
+                except Exception as e:
+                    last_error = str(e)
+                    await self.repos.alerts.mark_pending_failed(
+                        tg_id, listing_id, str(e),
+                        dead_reason=_is_permanent_delivery_error(e),
+                    )
+                    log.warning("Pending channel post failed for %s: %s", listing_id, e)
+                    continue
+                await self.repos.alerts.mark_alert_sent(
+                    tg_id, listing_id, content_hash=item.get_content_hash(),
+                    price=item.price, profit=valuation.net_profit,
+                    verdict=valuation.scam_verdict, condition=valuation.condition,
+                    sub_query="channel",
+                )
+                await self.repos.alerts.mark_pending_sent(tg_id, listing_id)
+                sent += 1
+                continue
+
+            if not await self.repos.users.has_background_access(tg_id):
+                await self.repos.alerts.mark_pending_sent(tg_id, listing_id)
+                continue
             if await self.repos.alerts.alert_already_sent(tg_id, listing_id):
                 await self.repos.alerts.mark_pending_sent(tg_id, listing_id)
                 continue
             try:
                 item = ParsedListing(**row["item"])
+                if await self.repos.alerts.content_alert_already_sent(
+                    tg_id, item.get_content_hash(), item.price or None
+                ):
+                    await self.repos.alerts.mark_pending_sent(tg_id, listing_id)
+                    continue
                 report = EvaluationReport(**row["report"])
                 valuation = Valuation(**row["valuation"])
                 await self.notifier.deal(
@@ -57,7 +97,8 @@ class MaintenanceTasks:
                 continue
             
             await self.repos.alerts.mark_alert_sent(
-                tg_id, listing_id, price=item.price, profit=valuation.net_profit,
+                tg_id, listing_id, content_hash=item.get_content_hash(),
+                price=item.price, profit=valuation.net_profit,
                 verdict=valuation.scam_verdict, condition=valuation.condition,
                 sub_query=row.get("sub_query"),
             )

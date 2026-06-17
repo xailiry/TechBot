@@ -60,5 +60,11 @@ class ParsedListing(BaseModel):
         """Stable card-level hash to detect re-posts with a new listing id."""
         import hashlib
 
-        payload = f"{self.title}|{self.location}|{self.image or ''}"
+        image_key = self.image or (self.images[0] if self.images else "")
+        image_key = image_key.split("?", 1)[0]
+        # Without a photo, title+location is too coarse: two legitimate
+        # same-model phones would collapse into one. In that case keep the
+        # listing id, accepting that a photo-less repost cannot be deduped.
+        identity = image_key or self.id
+        payload = f"{self.title}|{self.location}|{identity}"
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()

@@ -38,6 +38,8 @@ def feedback_features(item, report, valuation) -> dict:
         "baseline_price": baseline,
         "profit": getattr(valuation, "net_profit", None),
         "profit_pct": getattr(valuation, "profit_pct", None),
+        "roi_pct": getattr(valuation, "roi_pct", None),
+        "deal_score": getattr(valuation, "deal_score", None),
         "price_ratio": price_ratio,
         "avito_price_badge": getattr(item, "avito_price_badge", None),
         "avito_market_badge": bool(getattr(item, "avito_market_badge", False)),
@@ -121,7 +123,10 @@ def evaluate_personal_penalty(
         extra_profit += min(15000, 4000 + stats["reseller"] * 1500)
     elif stats.get("battery", 0) >= 2 and (
         (f["battery"] is not None and f["battery"] < 88)
-        or "battery_replaced" in f["defects"]
+        or bool(
+            {"battery_replaced", "battery_worn", "battery_suspicious"}
+            & set(f["defects"])
+        )
         or (f["battery"] == 100 and f["reseller_rebuild_signal"])
     ):
         reason = "feedback_battery"

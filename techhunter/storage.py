@@ -29,6 +29,7 @@ set_exclude_shop = _repos.users.set_exclude_shop
 toggle_exclude_condition = _repos.users.toggle_exclude_condition
 set_discovery_enabled = _repos.users.set_discovery_enabled
 set_discovery_profit = _repos.users.set_discovery_profit
+set_discovery_scan_mode = _repos.users.set_discovery_scan_mode
 
 # ─── Subscriptions ───────────────────────────────────────────────────────────
 add_subscription = _repos.subscriptions.add_subscription
@@ -36,6 +37,7 @@ active_subscriptions = _repos.subscriptions.active_subscriptions
 list_subscriptions = _repos.subscriptions.list_subscriptions
 get_subscription = _repos.subscriptions.get_subscription
 remove_subscription = _repos.subscriptions.remove_subscription
+toggle_subscription_paused = _repos.subscriptions.toggle_subscription_paused
 mark_subscription_onboarded = _repos.subscriptions.mark_subscription_onboarded
 
 # ─── Listings (dedup / evaluation cache) ─────────────────────────────────────
@@ -48,6 +50,7 @@ cache_listing_skipped = _repos.listings.cache_listing_skipped
 save_card_state = _repos.alerts.save_card_state
 get_card_state = _repos.alerts.get_card_state
 alert_already_sent = _repos.alerts.alert_already_sent
+content_alert_already_sent = _repos.alerts.content_alert_already_sent
 mark_alert_sent = _repos.alerts.mark_alert_sent
 queue_pending_alert = _repos.alerts.queue_pending_alert
 list_pending_alerts = _repos.alerts.list_pending_alerts
@@ -74,12 +77,14 @@ __all__ = [
     "upsert_user", "set_approved", "is_user_approved", "discovery_users",
     "all_user_ids", "set_paused", "is_paused", "get_delivery_prefs",
     "set_min_score", "set_exclude_shop", "toggle_exclude_condition",
-    "set_discovery_enabled", "set_discovery_profit",
+    "set_discovery_enabled", "set_discovery_profit", "set_discovery_scan_mode",
     "add_subscription", "active_subscriptions", "list_subscriptions",
-    "get_subscription", "remove_subscription", "mark_subscription_onboarded",
+    "get_subscription", "remove_subscription", "toggle_subscription_paused",
+    "mark_subscription_onboarded",
     "get_cached_listing", "check_content_duplicate", "cache_listing",
     "cache_listing_skipped",
     "save_card_state", "get_card_state", "alert_already_sent",
+    "content_alert_already_sent",
     "mark_alert_sent", "queue_pending_alert", "list_pending_alerts",
     "mark_pending_alert_attempt", "mark_pending_sent",
     "clear_dead_pending_alerts", "pending_alert_stats",
